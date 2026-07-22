@@ -1,6 +1,38 @@
 # Сборка и публикация Service Monitor
 
-## Быстрый старт (инженер / CI)
+## Бетатестерам (обезьянья установка)
+
+Репозиторий: https://github.com/IlhamDrinkX/service-monitor
+
+Тестеру **не нужно** заранее ставить Git/Node и клонировать репо.  
+Отдай одну команду или один файл — скрипт сам: поставит Git/Node → `git clone` → соберёт → запустит установщик.
+
+### Windows
+
+**Вариант 1 — одна строка в PowerShell** (Win+X → Terminal / PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/IlhamDrinkX/service-monitor/main/scripts/install-windows.ps1 | iex
+```
+
+**Вариант 2 — файл двойным кликом:**  
+скачать [`scripts/install-windows.cmd`](https://github.com/IlhamDrinkX/service-monitor/blob/main/scripts/install-windows.cmd) → сохранить → открыть.
+
+Проект окажется в `%USERPROFILE%\service-monitor`, установщик сам откроется из `apps\desktop\release\`.
+
+### macOS
+
+**Одна строка в Terminal:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/IlhamDrinkX/service-monitor/main/scripts/install-macos.sh | bash
+```
+
+Проект: `~/service-monitor`, затем откроется `.dmg`.
+
+---
+
+## Быстрый старт (инженер / уже есть клон)
 
 ### Windows
 
@@ -17,18 +49,15 @@ powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1
 ### macOS
 
 ```bash
-chmod +x scripts/bootstrap.sh
+chmod +x scripts/bootstrap.sh scripts/install-macos.sh
 bash scripts/bootstrap.sh
 ```
 
-Скрипт:
+Скрипт bootstrap (из клона):
 
-1. Проверяет **Git** (при отсутствии пробует `winget` / `brew` / `apt`)
-2. Проверяет **Node.js ≥ 20**
-3. Если есть `.git` — `git pull`; иначе `git clone`
-4. `npm install --legacy-peer-deps`
-5. Собирает core + desktop
-6. Собирает установщик: **NSIS (.exe)** на Windows, **DMG** на macOS
+1. Проверяет **Git** / **Node.js ≥ 20** (ставит через winget / brew)
+2. `git pull` или `git clone`
+3. `npm install` → сборка → installer
 
 Артефакты: `apps/desktop/release/`
 
@@ -36,44 +65,9 @@ bash scripts/bootstrap.sh
 
 | Env | Значение |
 |-----|----------|
-| `SERVICE_MONITOR_REPO` | URL репозитория (по умолчанию `https://github.com/IlhamDrinkX/service-monitor.git`) |
-| `SERVICE_MONITOR_DIR` | Каталог установки |
+| `SERVICE_MONITOR_REPO` | URL (по умолчанию `https://github.com/IlhamDrinkX/service-monitor.git`) |
+| `SERVICE_MONITOR_DIR` | Каталог (для install-*: `%USERPROFILE%\service-monitor` / `~/service-monitor`) |
 | `SERVICE_MONITOR_SKIP_DIST=1` | Только compile, без installer |
-
-Пример:
-
-```powershell
-$env:SERVICE_MONITOR_REPO = "https://github.com/IlhamDrinkX/service-monitor.git"
-.\scripts\bootstrap.ps1
-```
-
-## Бетатестерам (установка с нуля)
-
-Репозиторий: https://github.com/IlhamDrinkX/service-monitor  
-
-Скрипты лежат в папке [`scripts/`](https://github.com/IlhamDrinkX/service-monitor/tree/main/scripts):
-
-| ОС | Команда |
-|----|---------|
-| **Windows** | `scripts\bootstrap.cmd` (двойной клик) или `powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1` |
-| **macOS** | `bash scripts/bootstrap.sh` |
-
-**Windows — с нуля:**
-```powershell
-git clone https://github.com/IlhamDrinkX/service-monitor.git
-cd service-monitor
-.\scripts\bootstrap.cmd
-```
-
-**macOS — с нуля:**
-```bash
-git clone https://github.com/IlhamDrinkX/service-monitor.git
-cd service-monitor
-bash scripts/bootstrap.sh
-```
-
-Скрипт поставит зависимости (Git/Node при необходимости), соберёт приложение и установщик.  
-Готовый installer: `apps/desktop/release/` (`.exe` на Windows, `.dmg` на macOS).
 
 ## Публикация в GitHub
 

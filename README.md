@@ -25,7 +25,7 @@ service-monitor/
   packages/core/     # домен, SSH snippet, WriteGate, help, hints, NATS subjects
   apps/desktop/      # Electron + React (тёмная тема)
   apps/android/      # каркас + bridge contract (без native runtime)
-  scripts/           # bootstrap.ps1 / bootstrap.sh — clone/pull/build/installer
+  scripts/           # install-windows / install-macos (бета), bootstrap.*
   docs/STAGES.md
   docs/ANDROID.md
   docs/BUILD_AND_PUBLISH.md
@@ -41,20 +41,27 @@ npm run build -w @service-monitor/core
 npm run dev -w @service-monitor/desktop
 ```
 
-Установщик (Windows / macOS) для бетатестеров — см. [`docs/BUILD_AND_PUBLISH.md`](docs/BUILD_AND_PUBLISH.md):
+Установщик для бетатестеров (сам ставит Git/Node, клонирует, собирает):
 
+**Windows** — в PowerShell:
+```powershell
+irm https://raw.githubusercontent.com/IlhamDrinkX/service-monitor/main/scripts/install-windows.ps1 | iex
+```
+или двойной клик по [`scripts/install-windows.cmd`](scripts/install-windows.cmd).
+
+**macOS** — в Terminal:
 ```bash
-git clone https://github.com/IlhamDrinkX/service-monitor.git
-cd service-monitor
-# Windows:  scripts\bootstrap.cmd
-# macOS:    bash scripts/bootstrap.sh
+curl -fsSL https://raw.githubusercontent.com/IlhamDrinkX/service-monitor/main/scripts/install-macos.sh | bash
 ```
 
-Или локально:
+Подробнее: [`docs/BUILD_AND_PUBLISH.md`](docs/BUILD_AND_PUBLISH.md).
+
+Локально (если репо уже есть):
 
 ```bash
 npm run dist:win    # → apps/desktop/release/*.exe
 npm run dist:mac    # → apps/desktop/release/*.dmg
+# scripts\bootstrap.cmd  /  bash scripts/bootstrap.sh
 ```
 
 Если `npm install` падает с `ECONNRESET` (сеть) — повторите позже; ядро можно ставить отдельно:

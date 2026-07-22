@@ -1,0 +1,84 @@
+{
+  "name": "@service-monitor/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Service Monitor desktop shell (Electron)",
+  "author": "Fibbee / DrinkX",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "test": "node --test --experimental-strip-types src/stage0.desktop.test.ts",
+    "preview": "electron-vite preview",
+    "dist": "npm run build && electron-builder --publish never",
+    "dist:win": "npm run build && electron-builder --win --publish never",
+    "dist:mac": "npm run build && electron-builder --mac --publish never",
+    "dist:dir": "npm run build && electron-builder --dir --publish never"
+  },
+  "dependencies": {
+    "@service-monitor/core": "*",
+    "nats": "^2.29.3",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "ssh2": "^1.17.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.1.8",
+    "@types/react-dom": "19.1.6",
+    "@types/ssh2": "^1.15.5",
+    "@vitejs/plugin-react": "4.5.2",
+    "electron": "36.4.0",
+    "electron-builder": "26.0.12",
+    "electron-vite": "3.1.0",
+    "typescript": "5.8.3",
+    "vite": "6.3.5"
+  },
+  "build": {
+    "appId": "tech.drinkx.service-monitor",
+    "productName": "Service Monitor",
+    "copyright": "Copyright © DrinkX / Fibbee",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "artifactName": "ServiceMonitor-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["arm64", "x64"]
+        }
+      ],
+      "category": "public.app-category.utilities",
+      "artifactName": "ServiceMonitor-${version}-${arch}.${ext}",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
+    },
+    "dmg": {
+      "contents": [
+        { "x": 130, "y": 220 },
+        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+      ]
+    }
+  }
+}

@@ -1,0 +1,282 @@
+/**
+ * Preload: безопасный мост renderer ↔ main.
+ */
+
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
+import type {
+  ComplexSessionSnapshot,
+  ErpSalesPoint,
+  NatsConnectionInfo,
+  NatsMusterEntry,
+} from "@service-monitor/core";
+
+export type DesktopApi = {
+  getPaths: () => Promise<{
+    userData: string;
+    debugLogs: string;
+    identityFile: string;
+    pubkeyFile: string;
+    sshConfig: string;
+  }>;
+  setDebugEnabled: (enabled: boolean) => Promise<{ enabled: boolean }>;
+  exportDebugLog: () => Promise<string>;
+  log: (
+    level: "debug" | "info" | "warn" | "error",
+    scope: string,
+    message: string,
+    data?: unknown
+  ) => Promise<void>;
+  readPubkey: () => Promise<
+    | { ok: true; pubkey: string; path: string }
+    | { ok: false; error: string; path: string }
+  >;
+  generateKey: () => Promise<
+    | { ok: true; pubkey: string; path: string }
+    | { ok: false; error: string; path: string }
+  >;
+  renderSnippet: (input: {
+    seriesLabel: string;
+    name?: string;
+    includeJumpHost?: boolean;
+  }) => Promise<{ profile: unknown; snippet: string }>;
+  applyConfig: (input: {
+    seriesLabel: string;
+    name?: string;
+  }) => Promise<{
+    ok: true;
+    path: string;
+    profile: unknown;
+    jumpHostAdded: boolean;
+    hadJumpHost: boolean;
+  }>;
+  openSshConfig: () => Promise<
+    { ok: true; path: string } | { ok: false; error: string; path: string }
+  >;
+  openExternal: (
+    url: string
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
+  hashServicePassword: (password: string) => Promise<string>;
+  verifyServicePassword: (
+    password: string
+  ) => Promise<{ ok: boolean }>;
+  erpGetSession: () => Promise<
+    { ok: true; email: string } | { ok: false }
+  >;
+  erpLogin: (input: {
+    email: string;
+    password: string;
+  }) => Promise<
+    | { ok: true; email: string; role?: string }
+    | { ok: false; error: string }
+  >;
+  erpLogout: () => Promise<{ ok: true }>;
+  erpListSalesPoints: () => Promise<
+    | { ok: true; points: ErpSalesPoint[] }
+    | { ok: false; error: string }
+  >;
+  erpDashboardUrl: (
+    salesPointId: string
+  ) => Promise<{ ok: true; url: string } | { ok: false; error: string }>;
+  launchFleetTool: (input: {
+    tool: "module_test" | "sirup_test" | "flash_sirup" | "flash_obraz";
+    seriesLabel?: string;
+  }) => Promise<
+    | { ok: true; path: string; pid?: number }
+    | { ok: false; error: string }
+  >;
+  openFleetToolFolder: (
+    tool: "module_test" | "sirup_test" | "flash_sirup" | "flash_obraz"
+  ) => Promise<
+    { ok: true; path: string } | { ok: false; error: string; path: string }
+  >;
+  sessionGet: () => Promise<ComplexSessionSnapshot>;
+  sessionConnect: (input: {
+    mode: "remote" | "local";
+    seriesLabel?: string;
+  }) => Promise<ComplexSessionSnapshot>;
+  sessionDisconnect: () => Promise<ComplexSessionSnapshot>;
+  sessionHeartbeat: () => Promise<ComplexSessionSnapshot>;
+  sessionRefreshNetwork: () => Promise<ComplexSessionSnapshot>;
+  onSessionState: (cb: (snap: ComplexSessionSnapshot) => void) => () => void;
+  onAppResumed: (
+    cb: (payload: { at: string; connected?: boolean; error?: string }) => void
+  ) => () => void;
+  drinkxRead: (input: {
+    role: "milk" | "coffee" | "water";
+  }) => Promise<
+    | {
+        ok: true;
+        role: "milk" | "coffee" | "water";
+        path: string;
+        text: string;
+        label: string;
+      }
+    | { ok: false; error: string }
+  >;
+  drinkxWrite: (input: {
+    role: "milk" | "coffee" | "water";
+    text: string;
+    unlocked: boolean;
+    restart?: boolean;
+  }) => Promise<
+    | {
+        ok: true;
+        role: "milk" | "coffee" | "water";
+        path: string;
+        label: string;
+        restarted?: boolean;
+        restartDetail?: string;
+      }
+    | { ok: false; error: string }
+  >;
+  drinkxRestart: (input: {
+    role: "milk" | "coffee" | "water";
+  }) => Promise<
+    | {
+        ok: true;
+        role: "milk" | "coffee" | "water";
+        label: string;
+        detail: string;
+      }
+    | { ok: false; error: string }
+  >;
+  natsInfo: () => Promise<NatsConnectionInfo>;
+  natsConnect: (server?: string) => Promise<NatsConnectionInfo>;
+  natsDisconnect: () => Promise<NatsConnectionInfo>;
+  natsMuster: (
+    timeoutMs?: number
+  ) => Promise<
+    | { ok: true; modules: NatsMusterEntry[] }
+    | { ok: false; error: string }
+  >;
+  natsStatus: (
+    filter?: Record<string, unknown>
+  ) => Promise<{ ok: true; status: unknown } | { ok: false; error: string }>;
+  natsRequest: (input: {
+    subject: string;
+    payload?: unknown;
+    timeoutMs?: number;
+  }) => Promise<{ ok: true; data: unknown } | { ok: false; error: string }>;
+  natsPublish: (input: {
+    subject: string;
+    payload?: unknown;
+  }) => Promise<{ ok: true } | { ok: false; error: string }>;
+  natsSubscribeStatus: () => Promise<
+    { ok: true } | { ok: false; error: string }
+  >;
+  natsUpdateConfig: (
+    patch: Record<string, unknown>
+  ) => Promise<{ ok: true; data: unknown } | { ok: false; error: string }>;
+  onNatsState: (cb: (info: NatsConnectionInfo) => void) => () => void;
+  onNatsStatus: (cb: (payload: unknown) => void) => () => void;
+  syrupCheckSsh: () => Promise<
+    { ok: true; message: string } | { ok: false; error: string }
+  >;
+  syrupModbusScan: (input: {
+    mode: "scan" | "motor";
+    maxId?: number;
+    baud?: number;
+    id?: number;
+    seconds?: number;
+    intensity?: number;
+    singleMode?: boolean;
+  }) => Promise<
+    { ok: true; output: string } | { ok: false; error: string }
+  >;
+  flashPartA: (config: {
+    currentId: number | string;
+    newId: number | string;
+    currentBaud: number | string;
+    newBaud: number | string;
+  }) => Promise<{ ok: true } | { ok: false; error: string }>;
+  flashPartB: (config: {
+    newId: number | string;
+    newBaud: number | string;
+  }) => Promise<{ ok: true } | { ok: false; error: string }>;
+  onFlashLog: (
+    cb: (entry: { level: "log" | "error"; message: string }) => void
+  ) => () => void;
+};
+
+const api: DesktopApi = {
+  getPaths: () => ipcRenderer.invoke("app:getPaths"),
+  setDebugEnabled: (enabled) => ipcRenderer.invoke("debug:setEnabled", enabled),
+  exportDebugLog: () => ipcRenderer.invoke("debug:export"),
+  log: (level, scope, message, data) =>
+    ipcRenderer.invoke("debug:log", { level, scope, message, data }),
+  readPubkey: () => ipcRenderer.invoke("ssh:readPubkey"),
+  generateKey: () => ipcRenderer.invoke("ssh:generateKey"),
+  renderSnippet: (input) => ipcRenderer.invoke("ssh:renderSnippet", input),
+  applyConfig: (input) => ipcRenderer.invoke("ssh:applyConfig", input),
+  openSshConfig: () => ipcRenderer.invoke("ssh:openConfig"),
+  openExternal: (url) => ipcRenderer.invoke("shell:openExternal", url),
+  hashServicePassword: (password) =>
+    ipcRenderer.invoke("profiles:hashServicePassword", password),
+  verifyServicePassword: (password) =>
+    ipcRenderer.invoke("profiles:verifyServicePassword", password),
+  erpGetSession: () => ipcRenderer.invoke("erp:getSession"),
+  erpLogin: (input) => ipcRenderer.invoke("erp:login", input),
+  erpLogout: () => ipcRenderer.invoke("erp:logout"),
+  erpListSalesPoints: () => ipcRenderer.invoke("erp:listSalesPoints"),
+  erpDashboardUrl: (salesPointId) =>
+    ipcRenderer.invoke("erp:dashboardUrl", salesPointId),
+  launchFleetTool: (input) => ipcRenderer.invoke("fleet:launchTool", input),
+  openFleetToolFolder: (tool) =>
+    ipcRenderer.invoke("fleet:openToolFolder", tool),
+  sessionGet: () => ipcRenderer.invoke("session:get"),
+  sessionConnect: (input) => ipcRenderer.invoke("session:connect", input),
+  sessionDisconnect: () => ipcRenderer.invoke("session:disconnect"),
+  sessionHeartbeat: () => ipcRenderer.invoke("session:heartbeat"),
+  sessionRefreshNetwork: () => ipcRenderer.invoke("session:refreshNetwork"),
+  onSessionState: (cb) => {
+    const handler = (_e: IpcRendererEvent, snap: ComplexSessionSnapshot) =>
+      cb(snap);
+    ipcRenderer.on("session:state", handler);
+    return () => ipcRenderer.removeListener("session:state", handler);
+  },
+  onAppResumed: (cb) => {
+    const handler = (
+      _e: IpcRendererEvent,
+      payload: { at: string; connected?: boolean; error?: string }
+    ) => cb(payload);
+    ipcRenderer.on("app:resumed", handler);
+    return () => ipcRenderer.removeListener("app:resumed", handler);
+  },
+  drinkxRead: (input) => ipcRenderer.invoke("drinkx:read", input),
+  drinkxWrite: (input) => ipcRenderer.invoke("drinkx:write", input),
+  drinkxRestart: (input) => ipcRenderer.invoke("drinkx:restart", input),
+  natsInfo: () => ipcRenderer.invoke("nats:info"),
+  natsConnect: (server) => ipcRenderer.invoke("nats:connect", server),
+  natsDisconnect: () => ipcRenderer.invoke("nats:disconnect"),
+  natsMuster: (timeoutMs) => ipcRenderer.invoke("nats:muster", timeoutMs),
+  natsStatus: (filter) => ipcRenderer.invoke("nats:status", filter),
+  natsRequest: (input) => ipcRenderer.invoke("nats:request", input),
+  natsPublish: (input) => ipcRenderer.invoke("nats:publish", input),
+  natsSubscribeStatus: () => ipcRenderer.invoke("nats:subscribeStatus"),
+  natsUpdateConfig: (patch) => ipcRenderer.invoke("nats:updateConfig", patch),
+  onNatsState: (cb) => {
+    const handler = (_e: IpcRendererEvent, info: NatsConnectionInfo) =>
+      cb(info);
+    ipcRenderer.on("nats:state", handler);
+    return () => ipcRenderer.removeListener("nats:state", handler);
+  },
+  onNatsStatus: (cb) => {
+    const handler = (_e: IpcRendererEvent, payload: unknown) => cb(payload);
+    ipcRenderer.on("nats:status", handler);
+    return () => ipcRenderer.removeListener("nats:status", handler);
+  },
+  syrupCheckSsh: () => ipcRenderer.invoke("syrup:checkSsh"),
+  syrupModbusScan: (input) => ipcRenderer.invoke("syrup:modbusScan", input),
+  flashPartA: (config) => ipcRenderer.invoke("flash:partA", config),
+  flashPartB: (config) => ipcRenderer.invoke("flash:partB", config),
+  onFlashLog: (cb) => {
+    const handler = (
+      _e: IpcRendererEvent,
+      entry: { level: "log" | "error"; message: string }
+    ) => cb(entry);
+    ipcRenderer.on("flash:log", handler);
+    return () => ipcRenderer.removeListener("flash:log", handler);
+  },
+};
+
+contextBridge.exposeInMainWorld("desktop", api);

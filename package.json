@@ -1,0 +1,27 @@
+{
+  "name": "service-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Fibbee DrinkX service monitor for field engineers (Windows + macOS)",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @service-monitor/core && npm run build -w @service-monitor/desktop",
+    "dev": "npm run build -w @service-monitor/core && npm run dev -w @service-monitor/desktop",
+    "dist": "npm run build -w @service-monitor/core && npm run dist -w @service-monitor/desktop",
+    "dist:win": "npm run build -w @service-monitor/core && npm run dist:win -w @service-monitor/desktop",
+    "dist:mac": "npm run build -w @service-monitor/core && npm run dist:mac -w @service-monitor/desktop",
+    "bootstrap:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap.ps1",
+    "bootstrap:mac": "bash scripts/bootstrap.sh",
+    "test": "npm run test -w @service-monitor/core",
+    "test:stage0": "npm run test:stage0 -w @service-monitor/core",
+    "test:stage1": "npm run test:stage1 -w @service-monitor/core",
+    "test:stage2": "npm run test:stage2 -w @service-monitor/core",
+    "typecheck": "npm run typecheck -w @service-monitor/core"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

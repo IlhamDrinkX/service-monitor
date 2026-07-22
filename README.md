@@ -53,6 +53,7 @@ irm https://raw.githubusercontent.com/IlhamDrinkX/service-monitor/main/scripts/i
 ```bash
 curl -fsSL https://raw.githubusercontent.com/IlhamDrinkX/service-monitor/main/scripts/install-macos.sh | bash
 ```
+или двойной клик по [`scripts/install-macos.command`](scripts/install-macos.command).
 
 Подробнее: [`docs/BUILD_AND_PUBLISH.md`](docs/BUILD_AND_PUBLISH.md).
 

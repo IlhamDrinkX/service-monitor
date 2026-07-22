@@ -22,11 +22,14 @@ irm https://raw.githubusercontent.com/IlhamDrinkX/service-monitor/main/scripts/i
 
 ### macOS
 
-**Одна строка в Terminal:**
+**Вариант 1 — одна строка в Terminal:**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/IlhamDrinkX/service-monitor/main/scripts/install-macos.sh | bash
 ```
+
+**Вариант 2 — файл двойным кликом:**  
+скачать [`scripts/install-macos.command`](https://github.com/IlhamDrinkX/service-monitor/blob/main/scripts/install-macos.command) → в Finder правый клик → «Открыть» (первый раз macOS спросит подтверждение).
 
 Проект: `~/service-monitor`, затем откроется `.dmg`.
 

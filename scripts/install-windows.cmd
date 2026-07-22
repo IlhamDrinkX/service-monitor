@@ -1,28 +1,29 @@
 @echo off
-REM Service Monitor — установка для тестировщика (Windows)
-REM Двойной клик: скачает скрипт с GitHub (или запустит локальный) и всё сделает сам.
+REM Service Monitor install for Windows testers (ASCII-only messages = no mojibake)
+REM Double-click: downloads/runs install-windows.ps1 (Git/Node/clone/build/setup)
 setlocal
 title Service Monitor Install
+chcp 65001 >nul
 cd /d "%~dp0"
 
 echo.
-echo === Service Monitor: установка ===
+echo === Service Monitor: install ===
 echo.
 
-REM Если рядом лежит полный install-windows.ps1 (клон репо) — используем его.
 if exist "%~dp0install-windows.ps1" (
   powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install-windows.ps1"
 ) else (
-  echo Скачиваю установщик с GitHub...
+  echo Downloading installer script from GitHub...
   powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/IlhamDrinkX/service-monitor/main/scripts/install-windows.ps1 | iex"
 )
 
 set ERR=%ERRORLEVEL%
 echo.
 if %ERR% neq 0 (
-  echo Что-то пошло не так. Скопируй текст выше и отправь разработчику.
+  echo FAILED. Re-run this script - Electron download often breaks on flaky network.
+  echo Send the log above to the developer if it keeps failing.
 ) else (
-  echo Готово.
+  echo Done.
 )
 echo.
 pause

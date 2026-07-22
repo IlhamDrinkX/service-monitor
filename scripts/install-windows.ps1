@@ -128,11 +128,32 @@ function Sync-Repo {
   }
 }
 
+function Invoke-NpmInstall {
+  # Сеть часто рвёт скачивание Electron (ECONNRESET) — повторяем.
+  $env:npm_config_fetch_retries = "5"
+  $env:npm_config_fetch_retry_mintimeout = "20000"
+  $env:npm_config_fetch_retry_maxtimeout = "120000"
+
+  $max = 3
+  for ($i = 1; $i -le $max; $i++) {
+    Write-Step "npm install (попытка $i/$max, долго — подожди)"
+    npm install --legacy-peer-deps
+    if ($LASTEXITCODE -eq 0) { return }
+
+    Write-Host "npm install не удался (часто сеть / Electron). Повтор…" -ForegroundColor Yellow
+    # Битый частичный electron мешает следующей попытке
+    $electronDir = Join-Path $Root "node_modules\electron"
+    if (Test-Path $electronDir) {
+      Remove-Item $electronDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Seconds (5 * $i)
+  }
+  throw "npm install failed после $max попыток. Запусти скрипт ещё раз (нужен стабильный интернет)."
+}
+
 function Install-And-Build {
   Set-Location $Root
-  Write-Step "npm install (долго, подожди)"
-  npm install --legacy-peer-deps
-  if ($LASTEXITCODE -ne 0) { throw "npm install failed" }
+  Invoke-NpmInstall
 
   Write-Step "Сборка core + desktop"
   npm run build -w @service-monitor/core
@@ -175,17 +196,23 @@ function Install-And-Build {
 }
 
 try {
-  Write-Host "Service Monitor — установка для тестировщика (Windows)" -ForegroundColor Green
-  Write-Host "Репозиторий: $RepoUrl"
+  try {
+    chcp 65001 | Out-Null
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+    $OutputEncoding = [Console]::OutputEncoding
+  } catch { }
+
+  Write-Host "Service Monitor - install for Windows tester" -ForegroundColor Green
+  Write-Host "Repo: $RepoUrl"
   Ensure-Git
   Ensure-Node
   Sync-Repo
   Install-And-Build
   Write-Host ""
-  Write-Host "Установка собрана. Если установщик не открылся — смотри apps\desktop\release" -ForegroundColor Green
+  Write-Host "OK. If setup did not open, check apps\desktop\release" -ForegroundColor Green
 } catch {
   Write-Host ""
-  Write-Host "ОШИБКА: $($_.Exception.Message)" -ForegroundColor Red
-  Write-Host "Скопируй текст ошибки и отправь разработчику." -ForegroundColor Yellow
+  Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
+  Write-Host "Just re-run this script (network glitches are common on Electron download)." -ForegroundColor Yellow
   exit 1
 }

@@ -112,8 +112,25 @@ sync_repo() {
 
 install_and_build() {
   cd "${ROOT}"
-  step "npm install (долго, подожди)"
-  npm install --legacy-peer-deps
+
+  export npm_config_fetch_retries=5
+  export npm_config_fetch_retry_mintimeout=20000
+  export npm_config_fetch_retry_maxtimeout=120000
+
+  local attempt
+  for attempt in 1 2 3; do
+    step "npm install (попытка ${attempt}/3, долго — подожди)"
+    if npm install --legacy-peer-deps; then
+      break
+    fi
+    echo "npm install не удался (часто сеть / Electron). Повтор…"
+    rm -rf "${ROOT}/node_modules/electron" 2>/dev/null || true
+    sleep $((attempt * 5))
+    if [[ "${attempt}" -eq 3 ]]; then
+      echo "npm install failed после 3 попыток. Запусти скрипт ещё раз." >&2
+      exit 1
+    fi
+  done
 
   step "Сборка core + desktop"
   npm run build -w @service-monitor/core

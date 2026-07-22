@@ -1,15 +1,15 @@
-# Service Monitor — one-click install for Windows beta testers
+# Service Monitor - one-click install for Windows beta testers
+# ASCII-only messages (avoids PowerShell parse errors on broken UTF-8).
 #
-# Что делает сам:
-#   1) ставит Git и Node (через winget), если нет
-#   2) git clone в %USERPROFILE%\service-monitor
-#   3) npm install + сборка + installer (.exe)
-#   4) запускает установщик
+# What it does:
+#   1) install Git + Node via winget if missing
+#   2) git clone to %USERPROFILE%\service-monitor
+#   3) npm install + build + installer (.exe)
+#   4) launch the setup exe
 #
-# Запуск (любой из вариантов):
-#   A) Двойной клик по install-windows.cmd (скачать из репо)
-#   B) В PowerShell одной строкой:
-#      irm https://raw.githubusercontent.com/IlhamDrinkX/service-monitor/main/scripts/install-windows.ps1 | iex
+# Run:
+#   A) Double-click install-windows.cmd
+#   B) powershell: irm https://raw.githubusercontent.com/IlhamDrinkX/service-monitor/main/scripts/install-windows.ps1 | iex
 
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -56,16 +56,16 @@ function Ensure-Git {
     Write-Host "git: $(git --version)"
     return
   }
-  Write-Step "Git не найден — ставлю через winget"
+  Write-Step "Git not found - installing via winget"
   if (-not (Ensure-Command "winget")) {
-    throw "Нет Git и нет winget. Поставь Git с https://git-scm.com/download/win и запусти скрипт снова."
+    throw "Git and winget missing. Install Git from https://git-scm.com/download/win and re-run."
   }
   winget install --id Git.Git -e --source winget --accept-package-agreements --accept-source-agreements
   Refresh-Path
   Start-Sleep -Seconds 2
   Refresh-Path
   if (-not (Ensure-Command "git")) {
-    throw "Git поставили, но PATH ещё не обновился. Закрой окно, открой новое PowerShell и запусти скрипт снова."
+    throw "Git installed but PATH not updated. Open a new terminal and re-run."
   }
   Write-Host "git: $(git --version)"
 }
@@ -77,30 +77,30 @@ function Ensure-Node {
     $major = [int]($v.Split(".")[0])
     Write-Host "node: v$v"
     if ($major -lt 20) {
-      throw "Нужен Node.js >= 20 (сейчас v$v). Обнови с https://nodejs.org и запусти снова."
+      throw "Node.js >= 20 required (found v$v). Update from https://nodejs.org and re-run."
     }
     return
   }
-  Write-Step "Node.js не найден — ставлю LTS через winget"
+  Write-Step "Node.js not found - installing LTS via winget"
   if (-not (Ensure-Command "winget")) {
-    throw "Нет Node и нет winget. Поставь Node 20+ с https://nodejs.org и запусти снова."
+    throw "Node and winget missing. Install Node 20+ from https://nodejs.org and re-run."
   }
   winget install --id OpenJS.NodeJS.LTS -e --source winget --accept-package-agreements --accept-source-agreements
   Refresh-Path
   Start-Sleep -Seconds 2
   Refresh-Path
   if (-not (Ensure-Command "node")) {
-    throw "Node поставили, но PATH ещё не обновился. Закрой окно, открой новое PowerShell и запусти скрипт снова."
+    throw "Node installed but PATH not updated. Open a new terminal and re-run."
   }
   Write-Host "node: $(node -v)"
 }
 
 function Sync-Repo {
-  Write-Step "Папка проекта: $Root"
+  Write-Step "Project folder: $Root"
   New-Item -ItemType Directory -Force -Path (Split-Path $Root -Parent) | Out-Null
 
   if (Test-Path (Join-Path $Root ".git")) {
-    Write-Step "Уже есть клон — обновляю (git pull)"
+    Write-Step "Existing clone - git pull"
     Set-Location $Root
     git remote set-url origin $RepoUrl 2>$null
     git fetch --all --prune
@@ -111,68 +111,66 @@ function Sync-Repo {
       git pull --rebase origin $branch
     }
   } elseif (Test-Path (Join-Path $Root "package.json")) {
-    Write-Host "Есть package.json без .git — собираю как есть" -ForegroundColor Yellow
+    Write-Host "package.json without .git - building as-is" -ForegroundColor Yellow
     Set-Location $Root
   } else {
     if (Test-Path $Root) {
-      # Пустая или битая папка
       $items = Get-ChildItem $Root -Force -ErrorAction SilentlyContinue
       if ($items) {
-        throw "Папка $Root уже занята. Удали её или задай SERVICE_MONITOR_DIR=другой путь."
+        throw "Folder $Root is not empty. Delete it or set SERVICE_MONITOR_DIR to another path."
       }
       Remove-Item $Root -Force -ErrorAction SilentlyContinue
     }
-    Write-Step "Скачиваю проект (git clone)"
+    Write-Step "Cloning repository"
     git clone $RepoUrl $Root
     Set-Location $Root
   }
 }
 
 function Invoke-NpmInstall {
-  # Сеть часто рвёт скачивание Electron (ECONNRESET) — повторяем.
+  # Electron download often fails with ECONNRESET - retry.
   $env:npm_config_fetch_retries = "5"
   $env:npm_config_fetch_retry_mintimeout = "20000"
   $env:npm_config_fetch_retry_maxtimeout = "120000"
 
   $max = 3
   for ($i = 1; $i -le $max; $i++) {
-    Write-Step "npm install (попытка $i/$max, долго — подожди)"
+    Write-Step "npm install (attempt $i/$max, please wait)"
     npm install --legacy-peer-deps
     if ($LASTEXITCODE -eq 0) { return }
 
-    Write-Host "npm install не удался (часто сеть / Electron). Повтор…" -ForegroundColor Yellow
-    # Битый частичный electron мешает следующей попытке
+    Write-Host "npm install failed (often network/Electron). Retrying..." -ForegroundColor Yellow
     $electronDir = Join-Path $Root "node_modules\electron"
     if (Test-Path $electronDir) {
       Remove-Item $electronDir -Recurse -Force -ErrorAction SilentlyContinue
     }
     Start-Sleep -Seconds (5 * $i)
   }
-  throw "npm install failed после $max попыток. Запусти скрипт ещё раз (нужен стабильный интернет)."
+  throw "npm install failed after $max attempts. Re-run the script with a stable network."
 }
 
 function Install-And-Build {
   Set-Location $Root
   Invoke-NpmInstall
 
-  Write-Step "Сборка core + desktop"
+  Write-Step "Building core + desktop"
   npm run build -w @service-monitor/core
   if ($LASTEXITCODE -ne 0) { throw "core build failed" }
   npm run build -w @service-monitor/desktop
   if ($LASTEXITCODE -ne 0) { throw "desktop build failed" }
 
   if ($env:SERVICE_MONITOR_SKIP_DIST -eq "1") {
-    Write-Host "SKIP_DIST=1 — installer не собираю"
+    Write-Host "SKIP_DIST=1 - skipping installer"
     return
   }
 
-  Write-Step "Сборка установщика (.exe)"
+  Write-Step "Building Windows installer (.exe)"
   npm run dist:win -w @service-monitor/desktop
   if ($LASTEXITCODE -ne 0) { throw "dist:win failed" }
 
   $release = Join-Path $Root "apps\desktop\release"
   Write-Host ""
-  Write-Host "Готово. Файлы: $release" -ForegroundColor Green
+  Write-Host "Done. Files in: $release" -ForegroundColor Green
   if (-not (Test-Path $release)) { return }
 
   Get-ChildItem $release -File | ForEach-Object { Write-Host "  - $($_.FullName)" }
@@ -187,21 +185,15 @@ function Install-And-Build {
       Select-Object -First 1
   }
   if ($setup) {
-    Write-Step "Запускаю установщик: $($setup.Name)"
+    Write-Step "Launching installer: $($setup.Name)"
     Start-Process -FilePath $setup.FullName
   } else {
-    Write-Host "Открой папку вручную и запусти .exe:" -ForegroundColor Yellow
+    Write-Host "Open the folder and run the .exe manually:" -ForegroundColor Yellow
     Start-Process explorer.exe $release
   }
 }
 
 try {
-  try {
-    chcp 65001 | Out-Null
-    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
-    $OutputEncoding = [Console]::OutputEncoding
-  } catch { }
-
   Write-Host "Service Monitor - install for Windows tester" -ForegroundColor Green
   Write-Host "Repo: $RepoUrl"
   Ensure-Git

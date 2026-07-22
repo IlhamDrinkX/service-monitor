@@ -12,12 +12,20 @@ import {
   HELP_ARTICLES,
   NATS_SUBJECTS,
   sshPortFromSeries,
+  parseSeriesLabel,
   suggestCurrentThresholdFromDry,
 } from "./index.js";
 
 describe("stage0 / lan-map", () => {
   it("maps DrinkX series 4.15 to SSH port 22415", () => {
     assert.equal(sshPortFromSeries(4, 15), 22415);
+  });
+
+  it("parses flexible series labels", () => {
+    assert.equal(parseSeriesLabel("№4,17").label, "4.17");
+    assert.equal(parseSeriesLabel("Комплекс 4.09").label, "4.09");
+    assert.equal(sshPortFromSeries(0, 5), 22005);
+    assert.throws(() => parseSeriesLabel("abc"), /вида 4\.15/);
   });
 
   it("uses module web on :8000 and complexos/router on :80", () => {

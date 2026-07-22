@@ -106,8 +106,30 @@ export function sshPortFromSeries(major: number, minor: number): number {
   if (!Number.isInteger(major) || !Number.isInteger(minor)) {
     throw new Error("series parts must be integers");
   }
-  if (major < 1 || minor < 0 || minor > 99) {
-    throw new Error("series out of supported range");
+  // major 0..99, minor 0..99 → порт 22000..31999
+  if (major < 0 || major > 99 || minor < 0 || minor > 99) {
+    throw new Error(
+      `Серия вне диапазона (нужно 0.00–99.99, сейчас ${major}.${minor})`
+    );
   }
   return 22000 + major * 100 + minor;
+}
+
+/**
+ * Достаёт серию вида 4.15 из строки («4.15», «№4,15», «Комплекс 4.17»).
+ */
+export function parseSeriesLabel(raw: string): { major: number; minor: number; label: string } {
+  const text = String(raw ?? "").trim().replace(",", ".");
+  const m = /(\d{1,2})\.(\d{1,2})\b/.exec(text);
+  if (!m) {
+    throw new Error(
+      `Серия должна быть вида 4.15 (сейчас: "${text || "пусто"}")`
+    );
+  }
+  const major = Number.parseInt(m[1], 10);
+  const minor = Number.parseInt(m[2], 10);
+  sshPortFromSeries(major, minor);
+  // Сохраняем minor как введено (4.09 → "4.09"), без потери ведущего нуля в тексте серии
+  const label = `${major}.${m[2]}`;
+  return { major, minor, label };
 }

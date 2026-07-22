@@ -87,7 +87,9 @@ function AppShell() {
           <h1>{current.title}</h1>
           <span className={`badge${warn ? " danger" : " on"}`}>
             {warn
-              ? session.message || "Сессия не установлена"
+              ? !session.connected
+                ? "Сессия не установлена"
+                : session.message || "Сессия нестабильна"
               : session.mode === "local"
                 ? "Local LAN · ok"
                 : `Remote ${session.seriesLabel} · ok`}

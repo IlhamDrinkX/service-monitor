@@ -70,14 +70,18 @@ export function AccessPage() {
   }
 
   async function copySnippet() {
-    const res = await window.desktop.renderSnippet({
-      seriesLabel,
-      name,
-      includeJumpHost: false,
-    });
-    setSnippet(res.snippet);
-    await navigator.clipboard.writeText(res.snippet);
-    show("Скопирован только блок комплекса");
+    try {
+      const res = await window.desktop.renderSnippet({
+        seriesLabel,
+        name,
+        includeJumpHost: false,
+      });
+      setSnippet(res.snippet);
+      await navigator.clipboard.writeText(res.snippet);
+      show("Скопирован только блок комплекса");
+    } catch (e) {
+      show(e instanceof Error ? e.message : String(e), true);
+    }
   }
 
   async function applyConfig() {

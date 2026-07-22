@@ -3,7 +3,7 @@
  */
 
 import type { ComplexProfile } from "../domain/types.js";
-import { sshPortFromSeries } from "../domain/lan-map.js";
+import { parseSeriesLabel } from "../domain/lan-map.js";
 
 export interface CreateProfileInput {
   name: string;
@@ -39,17 +39,12 @@ export function profileFromSeriesLabel(
   seriesLabel: string,
   name?: string
 ): ComplexProfile {
-  const m = /^(\d+)\.(\d+)$/.exec(seriesLabel.trim());
-  if (!m) {
-    throw new Error('seriesLabel must look like "4.15"');
-  }
-  const major = Number(m[1]);
-  const minor = Number(m[2]);
-  const sshPort = sshPortFromSeries(major, minor);
+  const { major, minor, label } = parseSeriesLabel(seriesLabel);
+  const sshPort = 22000 + major * 100 + minor;
   return createComplexProfile({
-    name: name ?? `Комплекс №${seriesLabel}`,
+    name: name?.trim() || `Комплекс №${label}`,
     sshPort,
-    seriesLabel,
+    seriesLabel: label,
   });
 }
 

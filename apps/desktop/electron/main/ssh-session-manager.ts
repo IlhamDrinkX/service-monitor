@@ -23,6 +23,7 @@ import {
   isLanModulesReachable,
   lanHttpProbeSpecs,
   tunnelHttpProbeSpecs,
+  parseSeriesLabel,
   type ComplexSessionSnapshot,
   type ModuleRole,
   type SessionFailureReason,
@@ -103,12 +104,19 @@ export class ComplexSessionManager {
   }): Promise<ComplexSessionSnapshot> {
     await this.disconnect("not_connected");
 
-    const seriesLabel = input.seriesLabel.trim();
-    const m = /^(\d+)\.(\d+)$/.exec(seriesLabel);
-    if (!m) {
-      return this.fail("connect_failed", 'Серия должна быть вида "4.15"');
+    const seriesRaw = input.seriesLabel.trim();
+    let seriesLabel: string;
+    let sshPort: number;
+    try {
+      const parsed = parseSeriesLabel(seriesRaw);
+      seriesLabel = parsed.label;
+      sshPort = 22000 + parsed.major * 100 + parsed.minor;
+    } catch (e) {
+      return this.fail(
+        "connect_failed",
+        e instanceof Error ? e.message : 'Серия должна быть вида "4.15"'
+      );
     }
-    const sshPort = 22000 + Number(m[1]) * 100 + Number(m[2]);
 
     const forwards = DEFAULT_LAN_MAP.flatMap((e) => [
       "-L",
@@ -279,10 +287,11 @@ export class ComplexSessionManager {
     if (this.snapshot.mode === "local") {
       return this.heartbeatLocal();
     }
-    if (!this.snapshot.connected && this.snapshot.mode !== "remote") {
-      return this.getSnapshot();
+    if (this.snapshot.mode === "remote") {
+      return this.heartbeatRemote();
     }
-    return this.heartbeatRemote();
+    // Нет активной сессии — не оставляем чужие сообщения про «туннель».
+    return this.getSnapshot();
   }
 
   private async heartbeatLocal(): Promise<ComplexSessionSnapshot> {
@@ -320,21 +329,29 @@ export class ComplexSessionManager {
     return this.getSnapshot();
   }
 
+  private clearRemoteSession(
+    reason: SessionFailureReason,
+    message: string
+  ): ComplexSessionSnapshot {
+    this.stopHeartbeat();
+    this.remoteProbeFailStreak = 0;
+    this.snapshot = {
+      ...emptySession(reason),
+      message,
+    };
+    return this.getSnapshot();
+  }
+
   private async heartbeatRemote(): Promise<ComplexSessionSnapshot> {
     if (this.snapshot.mode !== "remote") {
       return this.getSnapshot();
     }
     if (!this.child || this.child.exitCode != null) {
-      this.stopHeartbeat();
-      this.remoteProbeFailStreak = 0;
-      this.snapshot = {
-        ...emptySession("process_dead"),
-        mode: "remote",
-        seriesLabel: this.snapshot.seriesLabel,
-        sshPort: this.snapshot.sshPort,
-        message: "SSH-процесс не активен",
-      };
-      return this.getSnapshot();
+      // Нет SSH-процесса — это не «туннель жив».
+      return this.clearRemoteSession(
+        "not_connected",
+        "Сессия не установлена"
+      );
     }
 
     // После сна порт может «ожить» с задержкой — не убивать туннель с первого фейла.
@@ -345,20 +362,12 @@ export class ComplexSessionManager {
     }
     if (!portOk) {
       this.killChild();
-      this.stopHeartbeat();
-      this.remoteProbeFailStreak = 0;
-      this.snapshot = {
-        ...emptySession("expired"),
-        mode: "remote",
-        seriesLabel: this.snapshot.seriesLabel,
-        sshPort: this.snapshot.sshPort,
-        message: "Сессия протухла (туннель не отвечает)",
-        lastAliveAt: this.snapshot.lastAliveAt,
-      };
-      return this.getSnapshot();
+      return this.clearRemoteSession(
+        "expired",
+        "Сессия протухла (туннель не отвечает)"
+      );
     }
 
-    // Туннель жив — сессия connected, даже если HTTP/NATS probe мигнул.
     const { devices, natsOnline, detail } = await probeLanStack("remote", {
       attempts: 2,
       timeoutMs: 2_500,
@@ -369,7 +378,6 @@ export class ComplexSessionManager {
     } else {
       this.remoteProbeFailStreak += 1;
     }
-    // Нужны 2 подряд fail, чтобы снять natsOnline (после крышки/нагрузки).
     const stableNats =
       natsOnline ||
       (this.remoteProbeFailStreak < 2 && this.snapshot.natsOnline === true);
@@ -383,7 +391,7 @@ export class ComplexSessionManager {
       failureReason: stableNats ? null : "expired",
       message: stableNats
         ? `Remote SSH · порт ${this.snapshot.sshPort}`
-        : `Туннель жив · NATS/модули временно недоступны (${detail})`,
+        : `SSH есть, сервисы offline (${detail})`,
       natsUrl: NATS_TUNNEL_URL,
       natsOnline: stableNats,
       devices: withStickyExtras(
@@ -397,6 +405,7 @@ export class ComplexSessionManager {
   isRemoteTunnelAlive(): boolean {
     return (
       this.snapshot.mode === "remote" &&
+      this.snapshot.connected === true &&
       this.child != null &&
       this.child.exitCode == null
     );

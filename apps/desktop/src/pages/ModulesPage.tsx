@@ -169,7 +169,9 @@ export function ModulesPage() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [terminalText]);
 
-  const natsReady = session.connected && session.natsOnline;
+  const sessionOk = session.connected === true;
+  /** Probe может мигать — к NATS пробуем при живой сессии + natsUrl. */
+  const canTryNats = sessionOk && !!session.natsUrl;
   const live = nats.connected;
   const unlocked =
     typeof sessionStorage !== "undefined" &&
@@ -319,9 +321,9 @@ export function ModulesPage() {
   }
 
   async function connectNats() {
-    if (!natsReady) {
+    if (!canTryNats) {
       setToast({
-        text: "Нужна сессия с NATS online (вкладка Сессия)",
+        text: "Нужна активная сессия (вкладка Сессия)",
         error: true,
       });
       return;
@@ -329,7 +331,10 @@ export function ModulesPage() {
     setBusy("nats");
     setToast(null);
     try {
-      const info = await window.desktop.natsConnect();
+      // Явно URL из сессии — даже если probe natsOnline=false.
+      const info = await window.desktop.natsConnect(
+        session.natsUrl ?? undefined
+      );
       setNats(info);
       if (!info.connected) {
         setToast({ text: info.message, error: true });
@@ -363,17 +368,51 @@ export function ModulesPage() {
     }
   }
 
-  // Auto-connect NATS once when session is ready and client is offline.
+  // Auto-connect NATS: несколько попыток (probe часто отстаёт от туннеля).
   useEffect(() => {
-    if (!natsReady || nats.connected || autoNatsTried.current) return;
-    autoNatsTried.current = true;
-    void connectNats();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot on session ready
-  }, [natsReady, nats.connected]);
+    if (!canTryNats || nats.connected) return;
+    let cancelled = false;
+    let attempts = 0;
+    const tryConnect = async () => {
+      while (!cancelled && attempts < 4 && !nats.connected) {
+        attempts += 1;
+        autoNatsTried.current = true;
+        try {
+          const info = await window.desktop.natsConnect(
+            session.natsUrl ?? undefined
+          );
+          if (cancelled) return;
+          setNats(info);
+          if (info.connected) {
+            try {
+              await window.desktop.natsSubscribeStatus();
+            } catch {
+              // ignore
+            }
+            try {
+              const muster = await window.desktop.natsMuster(900);
+              if (muster.ok) setModules(muster.modules);
+            } catch {
+              // ignore
+            }
+            return;
+          }
+        } catch (e) {
+          console.warn("[modules] auto-nats", attempts, e);
+        }
+        await new Promise((r) => setTimeout(r, 1200 * attempts));
+      }
+    };
+    void tryConnect();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canTryNats, session.natsUrl]);
 
   useEffect(() => {
-    if (!natsReady) autoNatsTried.current = false;
-  }, [natsReady]);
+    if (!canTryNats) autoNatsTried.current = false;
+  }, [canTryNats]);
 
   // После sleep/wake main шлёт app:resumed — переподключаем NATS.
   useEffect(() => {
@@ -393,14 +432,13 @@ export function ModulesPage() {
         } catch {
           // ignore
         }
-        if (session.connected && session.natsOnline) {
-          autoNatsTried.current = true;
+        if (session.connected && session.natsUrl) {
           await connectNats();
         }
       })();
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.connected, session.natsOnline]);
+  }, [session.connected, session.natsUrl]);
 
   async function disconnectNats() {
     setBusy("nats");
@@ -977,70 +1015,66 @@ export function ModulesPage() {
     <div className="stack">
       <div className={`panel${warn ? " panel-warn" : ""}`}>
         <h2>Modules Lab</h2>
-        <p className="lead">
-          Слева — исполнители (клапаны / насос / ТЭНы), справа — датчики live,
-          снизу — терминал и лог. Графики и CSV — для разбора выезда.
-        </p>
-        <div className="row">
-          <span className={`badge${natsReady ? " on" : " danger"}`}>
-            {natsReady
-              ? `Сессия · ${session.natsUrl}`
-              : "Сессия / NATS offline"}
+        <div className="lab-toolbar">
+          <span className={`badge${sessionOk ? " on" : " danger"}`}>
+            {sessionOk
+              ? session.natsOnline
+                ? `Сессия · NATS probe ok`
+                : `Сессия · probe NATS? · ${session.natsUrl ?? ""}`
+              : "Нет сессии"}
           </span>
           <span className={`badge${live ? " on" : ""}`}>
-            {live ? nats.message : "NATS клиент выкл"}
+            {live ? "NATS client ON" : "NATS client OFF"}
           </span>
-          <span className="badge">{labEvents.length} evt</span>
-        </div>
-        {toast ? (
-          <div className={`toast${toast.error ? " error" : ""}`}>
-            {toast.text}
-          </div>
-        ) : null}
-        <div className="row" style={{ marginTop: 12 }}>
+          <span className="badge">{labEvents.length}</span>
           <ActionButton
             helpId="modules.nats"
             variant="primary"
-            disabled={busy !== null || !natsReady || live}
+            className="btn-compact"
+            disabled={busy !== null || !canTryNats || live}
             onClick={() => void connectNats()}
           >
-            {busy === "nats" ? "…" : "Подключить NATS"}
+            {busy === "nats" ? "…" : "NATS"}
           </ActionButton>
           <ActionButton
+            className="btn-compact"
             disabled={busy !== null || !live}
             onClick={() => void disconnectNats()}
           >
-            Отключить
+            Off
           </ActionButton>
           <ActionButton
+            className="btn-compact"
             disabled={controlsDisabled}
             onClick={() => void resolveMuster()}
           >
             Muster
           </ActionButton>
           <ActionButton
+            className="btn-compact"
             disabled={labEvents.length === 0}
             onClick={() => setShowCharts((v) => !v)}
           >
-            {showCharts ? "Скрыть графики" : "Графики"}
+            {showCharts ? "Графики▾" : "Графики"}
           </ActionButton>
           <ActionButton
+            className="btn-compact"
             disabled={labEvents.length === 0}
             onClick={() => exportLabLog()}
           >
-            Выгрузить лог CSV
+            CSV
           </ActionButton>
           <ActionButton
+            className="btn-compact"
             disabled={labEvents.length === 0}
             onClick={() => {
               setLabEvents([]);
               pushLab("system", "clear", 0);
             }}
           >
-            Очистить лог
+            Clear
           </ActionButton>
-          <label className="muted">
-            Модуль{" "}
+          <label className="muted lab-select">
             <select
               value={host}
               disabled={!live}
@@ -1053,8 +1087,7 @@ export function ModulesPage() {
               ))}
             </select>
           </label>
-          <label className="muted">
-            hwid{" "}
+          <label className="muted lab-select">
             <select
               value={hwid}
               disabled={!live}
@@ -1072,6 +1105,11 @@ export function ModulesPage() {
             </select>
           </label>
         </div>
+        {toast ? (
+          <div className={`toast${toast.error ? " error" : ""}`}>
+            {toast.text}
+          </div>
+        ) : null}
       </div>
 
       {showCharts ? (
@@ -1084,8 +1122,8 @@ export function ModulesPage() {
       <div className="lab-grid">
         <div className="lab-col">
       {host === "milk" ? (
-        <div className="panel">
-          <h2>Молочные клапана (debug)</h2>
+        <div className="panel panel-compact">
+          <h2>Молочные клапана</h2>
           <div className="device-list">
             {milkSystemValveNumbers().map((v) => (
               <ToggleRow
@@ -1101,7 +1139,7 @@ export function ModulesPage() {
         </div>
       ) : null}
 
-      <div className="panel">
+      <div className="panel panel-compact">
         <h2>Клапаны · {host}</h2>
         <div className="row" style={{ marginBottom: 10 }}>
           <ActionButton
@@ -1131,7 +1169,7 @@ export function ModulesPage() {
         </div>
       </div>
 
-      <div className="panel">
+      <div className="panel panel-compact">
         <h2>Насос · {host}</h2>
         <div className="row" style={{ marginBottom: 10 }}>
           <label className="muted">
@@ -1179,7 +1217,7 @@ export function ModulesPage() {
         />
       </div>
 
-      <div className="panel">
+      <div className="panel panel-compact">
         <h2>Нагреватели</h2>
         <div className="row" style={{ marginBottom: 10 }}>
           <label className="muted">
@@ -1225,8 +1263,8 @@ export function ModulesPage() {
         </div>
       </div>
 
-      <div className="panel">
-        <h2>Сервисная диагностика</h2>
+      <div className="panel panel-compact">
+        <h2>Сервис</h2>
         <div className="row">
           {(host === "milk" || host === "coffee") && (
             <ActionButton
@@ -1342,8 +1380,8 @@ export function ModulesPage() {
       ) : null}
         </div>
 
-        <div className="lab-col">
-      <div className="panel">
+        <div className="lab-col lab-sensors-sticky">
+      <div className="panel panel-compact panel-sensors">
         <h2>Датчики · {host}</h2>
         <div className="sensor-list">
           {tempKeys.map((key) => (
@@ -1449,7 +1487,7 @@ export function ModulesPage() {
             </p>
             <div className="row">
               <ActionButton
-                disabled={busy !== null || !natsReady}
+                disabled={busy !== null || !canTryNats}
                 onClick={() =>
                   void window.desktop
                     .launchFleetTool({

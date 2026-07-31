@@ -207,7 +207,7 @@ export function ModulesPage() {
     async (
       subject: string,
       payload: Record<string, unknown> = {},
-      timeoutMs = 4000
+      timeoutMs = 2_000
     ) => {
       try {
         return await window.desktop.natsRequest({
@@ -227,33 +227,42 @@ export function ModulesPage() {
     const gen = pollGeneration.current;
     try {
       const valveIds = MODULE_VALVES[host];
-      const valveResults = await Promise.all(
-        valveIds.map(async (baseId) => {
-          const res = await req(valveStatusSubject(host, baseId), {}, 1800);
-          return [
-            baseId,
-            res.ok ? extractEnabledState(res.data) : null,
-          ] as const;
-        })
-      );
+      // Всё параллельно: статусы клапанов + насос/ТЭНы + общий status.
+      const [valveResults, pumpRes, heaterResults, statusRes] =
+        await Promise.all([
+          Promise.all(
+            valveIds.map(async (baseId) => {
+              const res = await req(
+                valveStatusSubject(host, baseId),
+                {},
+                700
+              );
+              return [
+                baseId,
+                res.ok ? extractEnabledState(res.data) : null,
+              ] as const;
+            })
+          ),
+          req(pumpStatusSubject(host), {}, 700),
+          Promise.all(
+            HEATER_IDS.map((hid) =>
+              req(heaterStatusSubject(host, hid), {}, 700).then(
+                (res) =>
+                  [
+                    hid,
+                    res.ok ? extractEnabledState(res.data) : null,
+                  ] as const
+              )
+            )
+          ),
+          req(NATS_SUBJECTS.status, {}, 1_000),
+        ]);
+
       if (pollPaused.current || gen !== pollGeneration.current) return;
       setValves(Object.fromEntries(valveResults));
-
-      const [pumpRes, ...heaterResults] = await Promise.all([
-        req(pumpStatusSubject(host), {}, 1800),
-        ...HEATER_IDS.map((hid) =>
-          req(heaterStatusSubject(host, hid), {}, 1800).then(
-            (res) =>
-              [hid, res.ok ? extractEnabledState(res.data) : null] as const
-          )
-        ),
-      ]);
-      if (pollPaused.current || gen !== pollGeneration.current) return;
       setPumpOn(pumpRes.ok ? extractEnabledState(pumpRes.data) : null);
       setHeaters(Object.fromEntries(heaterResults));
 
-      const statusRes = await req(NATS_SUBJECTS.status, {}, 3000);
-      if (pollPaused.current || gen !== pollGeneration.current) return;
       if (statusRes.ok) {
         const map = extractTempMap(statusRes.data, host);
         setTemps(map);
@@ -276,8 +285,7 @@ export function ModulesPage() {
   useEffect(() => {
     if (!live) return;
     void refreshDevices();
-    // Реже, чем раньше: иначе команды клапанов тонут в статусах.
-    const id = setInterval(() => void refreshDevices(), 2500);
+    const id = setInterval(() => void refreshDevices(), 800);
     return () => clearInterval(id);
   }, [live, host, hwid, refreshDevices]);
 
@@ -293,7 +301,7 @@ export function ModulesPage() {
     try {
       return await fn();
     } finally {
-      await sleep(350);
+      await sleep(80);
       pollPaused.current = false;
       release();
       void refreshDevices();
@@ -305,19 +313,27 @@ export function ModulesPage() {
     enabled: boolean
   ): Promise<{ ok: boolean; error?: string }> {
     let lastError: string | undefined;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const cmd = await req(valveCommandSubject(host, baseId, enabled), {}, 3500);
+    // Быстрый путь: команда + 1–2 verify, короткие таймауты.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const cmd = await req(
+        valveCommandSubject(host, baseId, enabled),
+        {},
+        1_200
+      );
       if (!cmd.ok) {
         lastError = cmd.error;
-        await sleep(180);
+        await sleep(50);
         continue;
       }
-      const st = await req(valveStatusSubject(host, baseId), {}, 2000);
+      const st = await req(valveStatusSubject(host, baseId), {}, 600);
       const got = st.ok ? extractEnabledState(st.data) : null;
       if (got === enabled) return { ok: true };
-      await sleep(180);
+      await sleep(50);
     }
-    return { ok: false, error: lastError || "состояние клапана не подтвердилось" };
+    return {
+      ok: false,
+      error: lastError || "состояние клапана не подтвердилось",
+    };
   }
 
   async function connectNats() {
@@ -497,7 +513,7 @@ export function ModulesPage() {
             text: res.error || `Клапан ${baseId}: не подтверждён`,
             error: true,
           });
-          const st = await req(valveStatusSubject(host, baseId), {}, 2000);
+          const st = await req(valveStatusSubject(host, baseId), {}, 600);
           setValves((v) => ({
             ...v,
             [baseId]: st.ok ? extractEnabledState(st.data) : null,
@@ -997,7 +1013,7 @@ export function ModulesPage() {
       }
     }
     pushLab("command", subject, "request", termCmd || "{}");
-    const res = await req(subject, payload, 5000);
+    const res = await req(subject, payload, 2_500);
     if (res.ok) {
       pushLab(
         "command",

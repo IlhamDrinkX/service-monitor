@@ -156,7 +156,16 @@ export type DesktopApi = {
     subject: string;
     payload?: unknown;
     timeoutMs?: number;
+    priority?: "command" | "poll";
   }) => Promise<{ ok: true; data: unknown } | { ok: false; error: string }>;
+  natsRequestMany: (input: {
+    subject: string;
+    payload?: unknown;
+    timeoutMs?: number;
+    priority?: "command" | "poll";
+  }) => Promise<
+    { ok: true; replies: unknown[] } | { ok: false; error: string }
+  >;
   natsPublish: (input: {
     subject: string;
     payload?: unknown;
@@ -251,6 +260,7 @@ const api: DesktopApi = {
   natsMuster: (timeoutMs) => ipcRenderer.invoke("nats:muster", timeoutMs),
   natsStatus: (filter) => ipcRenderer.invoke("nats:status", filter),
   natsRequest: (input) => ipcRenderer.invoke("nats:request", input),
+  natsRequestMany: (input) => ipcRenderer.invoke("nats:requestMany", input),
   natsPublish: (input) => ipcRenderer.invoke("nats:publish", input),
   natsSubscribeStatus: () => ipcRenderer.invoke("nats:subscribeStatus"),
   natsUpdateConfig: (patch) => ipcRenderer.invoke("nats:updateConfig", patch),

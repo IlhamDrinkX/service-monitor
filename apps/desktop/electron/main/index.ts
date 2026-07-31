@@ -33,6 +33,7 @@ import {
   natsMuster,
   natsPublish,
   natsRequest,
+  natsRequestMany,
   natsStatus,
   natsSubscribeStatus,
   natsUpdateConfig,
@@ -509,15 +510,48 @@ function registerIpc(): void {
     "nats:request",
     async (
       _e,
-      input: { subject: string; payload?: unknown; timeoutMs?: number }
+      input: {
+        subject: string;
+        payload?: unknown;
+        timeoutMs?: number;
+        priority?: "command" | "poll";
+      }
     ) => {
       try {
         const data = await natsRequest(
           input.subject,
           input.payload ?? {},
-          input.timeoutMs ?? 5_000
+          input.timeoutMs ?? 5_000,
+          input.priority ?? "command"
         );
         return { ok: true as const, data };
+      } catch (e) {
+        return {
+          ok: false as const,
+          error: e instanceof Error ? e.message : String(e),
+        };
+      }
+    }
+  );
+  ipcMain.handle(
+    "nats:requestMany",
+    async (
+      _e,
+      input: {
+        subject: string;
+        payload?: unknown;
+        timeoutMs?: number;
+        priority?: "command" | "poll";
+      }
+    ) => {
+      try {
+        const replies = await natsRequestMany(
+          input.subject,
+          input.payload ?? {},
+          input.timeoutMs ?? 900,
+          input.priority ?? "poll"
+        );
+        return { ok: true as const, replies };
       } catch (e) {
         return {
           ok: false as const,

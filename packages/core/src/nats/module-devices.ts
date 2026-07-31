@@ -90,6 +90,23 @@ export function pumpStopSubject(host: DrinkxHost): string {
   return `pumps.stop.${host}!`;
 }
 
+export type PumpDirection = "forward" | "reverse";
+
+/** Payload для pumps.{host}! — reverse поддерживается с cm-drv direction/reverse. */
+export function pumpCommandPayload(input: {
+  durationMs: number;
+  powerPercent: number;
+  direction?: PumpDirection;
+}): Record<string, unknown> {
+  const direction = input.direction ?? "forward";
+  return {
+    duration: input.durationMs,
+    power: pumpPowerToPwm(input.powerPercent),
+    direction,
+    reverse: direction === "reverse",
+  };
+}
+
 export function heaterStatusSubject(host: DrinkxHost, heaterId: string): string {
   return `heaters.status.${host}-${heaterId}`;
 }
@@ -260,6 +277,84 @@ export function extractWaterTotalPulses(
     }
   }
   return null;
+}
+
+/**
+ * Давление воды (bar) из status sensors.
+ * cm-drv: `{ name: `${dxRole}_water_pressure`, type: "pressure", value }`.
+ */
+export function extractWaterPressure(
+  statusResponse: unknown,
+  host: DrinkxHost = "water"
+): number | null {
+  const sensors = extractStatusSensors(statusResponse, host);
+  for (const sensor of sensors) {
+    const type = String(sensor?.type || "").toLowerCase();
+    const normalizedName = String(sensor?.name || "")
+      .replace(/\s+/g, "")
+      .replace(/[{}]/g, "")
+      .toLowerCase();
+    const byType = type === "pressure";
+    const byName =
+      normalizedName.endsWith("water_pressure") ||
+      normalizedName === "water_pressure" ||
+      normalizedName.endsWith("_pressure") ||
+      normalizedName === "pressure";
+    if (!byType && !byName) continue;
+    const n = Number(sensor.value);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+/**
+ * Ток насоса (pump_R_IS) — deep-search в status.
+ * cm-drv getStatus обычно не кладёт R_IS в sensors; ищем ключи в дереве.
+ */
+export function extractPumpCurrent(statusResponse: unknown): number | null {
+  if (statusResponse == null) return null;
+
+  for (const sensor of extractStatusSensors(statusResponse)) {
+    const normalizedName = String(sensor?.name || "")
+      .replace(/\s+/g, "")
+      .replace(/[{}]/g, "")
+      .toLowerCase();
+    if (
+      normalizedName.endsWith("pump_r_is") ||
+      normalizedName === "pump_r_is" ||
+      normalizedName.endsWith("pump_current") ||
+      normalizedName.includes("pump_r_is")
+    ) {
+      const n = Number(sensor.value);
+      if (Number.isFinite(n)) return n;
+    }
+  }
+
+  const found: number[] = [];
+  const walk = (node: unknown, keyHint: string): void => {
+    if (node == null) return;
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item, keyHint);
+      return;
+    }
+    if (typeof node !== "object") return;
+    for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+      const lk = k.toLowerCase();
+      if (
+        lk === "pump_r_is" ||
+        lk === "pumpr_is" ||
+        lk.endsWith("_pump_r_is") ||
+        lk === "pumpcurrent"
+      ) {
+        const n = Number(v);
+        if (Number.isFinite(n)) found.push(n);
+      } else if (v && typeof v === "object") {
+        walk(v, lk);
+      }
+    }
+  };
+  walk(statusResponse, "");
+  return found.length > 0 ? found[0]! : null;
 }
 
 export const FLOW_CALIBRATION_QTYS = [100, 200, 300, 400] as const;

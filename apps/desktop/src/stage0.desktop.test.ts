@@ -15,6 +15,9 @@ describe("desktop / stage0 content wiring", () => {
       "nav.fleet",
       "nav.access",
       "nav.session",
+      "nav.modules",
+      "nav.complexos",
+      "nav.config",
       "nav.help",
       "nav.settings",
       "access.generateKey",
@@ -33,6 +36,7 @@ describe("desktop / stage0 content wiring", () => {
   it("has help articles for complex architecture", () => {
     assert.ok(HELP_ARTICLES.some((a) => a.id === "how-complex-works"));
     assert.ok(HELP_ARTICLES.some((a) => a.id === "debug-mode"));
+    assert.ok(HELP_ARTICLES.some((a) => a.id === "nats-payloads"));
   });
 
   it("session shortcuts point at tunnel ports", () => {

@@ -6,7 +6,9 @@ import assert from "node:assert/strict";
 import {
   extractEnabledState,
   extractTempMap,
+  extractWaterPressure,
   extractWaterTotalPulses,
+  extractPumpCurrent,
   pumpPowerToPwm,
   valveCommandSubject,
   defaultHwid,
@@ -52,6 +54,27 @@ describe("stage5 / module-devices", () => {
         sensors: [{ name: "water_total_pulses", value: 1234 }],
       }),
       1234
+    );
+  });
+
+  it("extracts water pressure from typed sensor", () => {
+    assert.equal(
+      extractWaterPressure({
+        sensors: [
+          { name: "water_water_pressure", type: "pressure", value: 1.85 },
+          { name: "water_total_pulses", type: "counter", value: 10 },
+        ],
+      }),
+      1.85
+    );
+  });
+
+  it("extracts pump current via deep search", () => {
+    assert.equal(
+      extractPumpCurrent({
+        result: { temps: { pump_R_IS: 1.23, input: 20 } },
+      }),
+      1.23
     );
   });
 });

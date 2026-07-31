@@ -59,12 +59,15 @@ export {
   pumpStopSubject,
   pumpStatusSubject,
   pumpPowerToPwm,
+  pumpCommandPayload,
   heaterCommandSubject,
   heaterStopSubject,
   heaterStatusSubject,
   extractEnabledState,
   extractTempMap,
   extractWaterTotalPulses,
+  extractWaterPressure,
+  extractPumpCurrent,
   expectedTempKeys,
   TEMP_SENSOR_LABELS,
   FLOW_CALIBRATION_QTYS,
@@ -73,11 +76,71 @@ export {
   FLOW_CALIBRATION_PULSES_POLL_MS,
   milkSystemValveNumbers,
 } from "./nats/module-devices.js";
-export type { DrinkxHost, TempSensorKey } from "./nats/module-devices.js";
+export type { DrinkxHost, TempSensorKey, PumpDirection } from "./nats/module-devices.js";
 export {
   createLabEvent,
   formatLabTerminalLine,
   labEventsToCsv,
   sensorSeries,
+  chartSinceMs,
+  booleanStepSeries,
+  pumpPowerSeries,
+  chartSeriesMeta,
+  seriesKey,
+  parseSeriesKey,
+  snapshotAt,
+  complexSensorCatalog,
 } from "./nats/lab-log.js";
-export type { LabEvent, LabEventKind } from "./nats/lab-log.js";
+export type {
+  LabEvent,
+  LabEventKind,
+  ChartTimeScale,
+  ChartSeriesMeta,
+  LabSnapshotRow,
+} from "./nats/lab-log.js";
+export {
+  VALVE_PACKAGES,
+  getValvePackage,
+} from "./nats/valve-packages.js";
+export type {
+  ValveStep,
+  ValvePackage,
+  ValvePackageId,
+} from "./nats/valve-packages.js";
+export {
+  HEATER_WARMUP_DEFAULTS,
+  warmupSensorKey,
+  warmupOverheatKey,
+} from "./nats/heater-warmup.js";
+export {
+  parseComplexStatusTuple,
+  complexTupleSummary,
+} from "./nats/complex-status.js";
+export type {
+  ComplexHostSnapshot,
+  ComplexStatusTuple,
+} from "./nats/complex-status.js";
+export {
+  layoutModuleChartKeys,
+  moduleChartColumns,
+} from "./nats/chart-layout.js";
+export {
+  COMPLEXOS_SUBJECTS,
+  CLEANING_TIMING_KEYS,
+  CLEANING_TIMING_LABELS,
+} from "./nats/complexos-subjects.js";
+export type {
+  CleaningTimingKey,
+  ComplexOsRisk,
+} from "./nats/complexos-subjects.js";
+export {
+  TERMINAL_SUBJECT_PRESETS,
+  TERMINAL_PAYLOAD_PRESETS,
+  TERMINAL_PAYLOAD_RULES,
+  findSubjectPresetFor,
+  associatedPayloadIds,
+} from "./nats/terminal-presets.js";
+export type {
+  TerminalSubjectPreset,
+  TerminalPayloadPreset,
+} from "./nats/terminal-presets.js";

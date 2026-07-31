@@ -1,12 +1,16 @@
 /**
- * Stage 4: правка drinkx.json с подсказками из cm-drv + diff.
+ * Stage 4: drinkx.json + ComplexOS cleaning timings.
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
+  CLEANING_TIMING_KEYS,
+  CLEANING_TIMING_LABELS,
+  COMPLEXOS_SUBJECTS,
   getParamHint,
   listParamHints,
   summarizeJsonDiff,
+  type CleaningTimingKey,
   type ParamHint,
 } from "@service-monitor/core";
 import { ActionButton } from "../components/ActionButton";
@@ -25,6 +29,15 @@ function flattenKeys(obj: unknown, prefix = ""): string[] {
   return keys;
 }
 
+function unwrapResult(data: unknown): Record<string, unknown> {
+  if (!data || typeof data !== "object") return {};
+  const r = data as Record<string, unknown>;
+  if (r.result && typeof r.result === "object") {
+    return r.result as Record<string, unknown>;
+  }
+  return r;
+}
+
 export function ConfigPage() {
   const { session, warn } = useComplexSession();
   const sessionOk = session.connected && !warn;
@@ -37,6 +50,10 @@ export function ConfigPage() {
   const [toast, setToast] = useState<{ text: string; error?: boolean } | null>(
     null
   );
+  const [timingDraft, setTimingDraft] = useState<
+    Partial<Record<CleaningTimingKey, number>>
+  >({});
+  const [timingLoaded, setTimingLoaded] = useState(false);
 
   const unlocked =
     typeof sessionStorage !== "undefined" &&
@@ -60,6 +77,14 @@ export function ConfigPage() {
     () => (dirty && original ? summarizeJsonDiff(original, text) : []),
     [dirty, original, text]
   );
+
+  useEffect(() => {
+    void window.desktop.natsInfo().then((info) => {
+      if (!info.connected && session.natsUrl && sessionOk) {
+        void window.desktop.natsConnect(session.natsUrl);
+      }
+    });
+  }, [session.natsUrl, sessionOk]);
 
   async function load() {
     if (!sessionOk) {
@@ -141,6 +166,80 @@ export function ConfigPage() {
     }
   }
 
+  async function loadCleaningTimings() {
+    if (!sessionOk) {
+      setToast({ text: "Сначала подключите сессию", error: true });
+      return;
+    }
+    setBusy(true);
+    setToast(null);
+    try {
+      const info = await window.desktop.natsConnect(
+        session.natsUrl ?? undefined
+      );
+      if (!info.connected) {
+        setToast({ text: info.message, error: true });
+        return;
+      }
+      const res = await window.desktop.natsRequest({
+        subject: COMPLEXOS_SUBJECTS.cleaningConfig,
+        payload: {},
+        timeoutMs: 5_000,
+        priority: "command",
+      });
+      if (!res.ok) {
+        setToast({ text: res.error, error: true });
+        return;
+      }
+      const body = unwrapResult(res.data);
+      const draft: Partial<Record<CleaningTimingKey, number>> = {};
+      for (const k of CLEANING_TIMING_KEYS) {
+        const v = Number(body[k]);
+        if (Number.isFinite(v)) draft[k] = v;
+      }
+      setTimingDraft(draft);
+      setTimingLoaded(true);
+      setToast({ text: "ComplexOS cleaning-config загружен" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveCleaningTimings() {
+    if (!unlocked) {
+      setToast({
+        text: "Разблокируйте правки в Настройках (сервисный пароль)",
+        error: true,
+      });
+      return;
+    }
+    if (
+      !window.confirm(
+        "Записать cleaning timings через coffeemachine.update-config?\n" +
+          "Это runtime; durable источник — ERP osconfig."
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    setToast(null);
+    try {
+      const patch: Record<string, number> = {};
+      for (const k of CLEANING_TIMING_KEYS) {
+        const v = timingDraft[k];
+        if (typeof v === "number" && Number.isFinite(v)) patch[k] = v;
+      }
+      const res = await window.desktop.natsUpdateConfig(patch);
+      if (!res.ok) {
+        setToast({ text: res.error, error: true });
+        return;
+      }
+      setToast({ text: "timings записаны (update-config)" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="stack">
       <div className={`panel${warn ? " panel-warn" : ""}`}>
@@ -210,6 +309,54 @@ export function ConfigPage() {
             {toast.text}
           </div>
         ) : null}
+      </div>
+
+      <div className="panel">
+        <h2>ComplexOS · cleaning timings</h2>
+        <p className="lead">
+          Чтение <code>complexos.dashboard.cleaning-config</code>, запись{" "}
+          <code>coffeemachine.update-config</code>. Полный{" "}
+          <code>osconfig</code> ERP по NATS не пишется — только runtime timings.
+        </p>
+        <div className="row">
+          <ActionButton
+            disabled={busy || !sessionOk}
+            onClick={() => void loadCleaningTimings()}
+          >
+            Загрузить timings
+          </ActionButton>
+          <ActionButton
+            variant="primary"
+            disabled={busy || !sessionOk || !unlocked || !timingLoaded}
+            onClick={() => void saveCleaningTimings()}
+          >
+            Сохранить timings
+          </ActionButton>
+        </div>
+        {timingLoaded ? (
+          <div className="cos-timing-grid" style={{ marginTop: 12 }}>
+            {CLEANING_TIMING_KEYS.map((k) => (
+              <label key={k} className="muted">
+                {CLEANING_TIMING_LABELS[k]}
+                <input
+                  type="number"
+                  value={timingDraft[k] ?? ""}
+                  disabled={!unlocked}
+                  onChange={(e) =>
+                    setTimingDraft((prev) => ({
+                      ...prev,
+                      [k]: Number(e.target.value) || 0,
+                    }))
+                  }
+                />
+              </label>
+            ))}
+          </div>
+        ) : (
+          <p className="muted" style={{ marginTop: 10 }}>
+            Загрузите timings с комплекса.
+          </p>
+        )}
       </div>
 
       <div className="grid-2">

@@ -195,14 +195,85 @@ export async function natsMuster(
   });
 }
 
-/** Сериализуем request — иначе poll + toggle клапанов заливают inbox и «ломают» кнопки. */
-let requestChain: Promise<unknown> = Promise.resolve();
+/** Команды (клапаны) не ждут опрос — иначе UI «залипает». */
+let commandChain: Promise<unknown> = Promise.resolve();
+
+export type NatsRequestPriority = "command" | "poll";
+
+/**
+ * Кортеж ответов на один publish (как muster / module_test requestMany).
+ * Для coffeemachine.status собирает replies от всех модулей + facade.
+ */
+export async function natsRequestMany(
+  subject: string,
+  payload: unknown = {},
+  timeoutMs = 900,
+  priority: NatsRequestPriority = "poll"
+): Promise<unknown[]> {
+  const run = async (): Promise<unknown[]> => {
+    const conn = await ensure();
+    const reply = inbox();
+    const results: unknown[] = [];
+    const seen = new Set<string>();
+
+    return await new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (err?: Error) => {
+        if (settled) return;
+        settled = true;
+        try {
+          sub.unsubscribe();
+        } catch {
+          // ignore
+        }
+        if (err) reject(err);
+        else resolve(results);
+      };
+
+      const sub = conn.subscribe(reply, {
+        callback: (err, msg) => {
+          if (err) {
+            finish(err);
+            return;
+          }
+          const raw = decode(msg.data);
+          const key = JSON.stringify(raw);
+          if (seen.has(key)) return;
+          seen.add(key);
+          results.push(raw);
+        },
+      });
+
+      try {
+        conn.publish(subject, encode(payload ?? {}), { reply });
+      } catch (e) {
+        finish(e instanceof Error ? e : new Error(String(e)));
+        return;
+      }
+      setTimeout(() => finish(), timeoutMs);
+    });
+  };
+
+  if (priority === "command") {
+    const next = commandChain.then(run, run);
+    commandChain = next.then(
+      () => undefined,
+      () => undefined
+    );
+    return next as Promise<unknown[]>;
+  }
+
+  // poll: ждём только команды; между собой опросы идут параллельно
+  // (иначе requestMany + valves.status сериализуются и все таймаутятся).
+  return commandChain.then(run, run) as Promise<unknown[]>;
+}
 
 /** Request/response с inbox (упрощённо относительно aerp ack-retry). */
 export async function natsRequest(
   subject: string,
   payload: unknown = {},
-  timeoutMs = DEFAULT_TIMEOUT
+  timeoutMs = DEFAULT_TIMEOUT,
+  priority: NatsRequestPriority = "command"
 ): Promise<unknown> {
   const run = async (): Promise<unknown> => {
     try {
@@ -246,12 +317,17 @@ export async function natsRequest(
     }
   };
 
-  const next = requestChain.then(run, run);
-  requestChain = next.then(
-    () => undefined,
-    () => undefined
-  );
-  return next;
+  if (priority === "command") {
+    const next = commandChain.then(run, run);
+    commandChain = next.then(
+      () => undefined,
+      () => undefined
+    );
+    return next;
+  }
+
+  // poll: ждёт только команды, параллельно с другими poll
+  return commandChain.then(run, run);
 }
 
 export async function natsStatus(filter: Record<string, unknown> = {}): Promise<unknown> {

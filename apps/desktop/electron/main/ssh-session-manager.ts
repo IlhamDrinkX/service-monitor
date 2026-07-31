@@ -383,6 +383,8 @@ export class ComplexSessionManager {
       (this.remoteProbeFailStreak < 2 && this.snapshot.natsOnline === true);
 
     const now = new Date().toISOString();
+    const falseSession =
+      !stableNats && this.remoteProbeFailStreak >= 3 && this.snapshot.connected;
     this.snapshot = {
       ...this.snapshot,
       connected: true,
@@ -391,7 +393,9 @@ export class ComplexSessionManager {
       failureReason: stableNats ? null : "expired",
       message: stableNats
         ? `Remote SSH · порт ${this.snapshot.sshPort}`
-        : `SSH есть, сервисы offline (${detail})`,
+        : falseSession
+          ? `Возможно ложная сессия: forwards есть, сервисы нет (${detail}). Переподключите.`
+          : `SSH есть, сервисы offline (${detail})`,
       natsUrl: NATS_TUNNEL_URL,
       natsOnline: stableNats,
       devices: withStickyExtras(

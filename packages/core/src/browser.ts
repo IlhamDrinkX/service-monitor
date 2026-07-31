@@ -74,3 +74,10 @@ export {
   milkSystemValveNumbers,
 } from "./nats/module-devices.js";
 export type { DrinkxHost, TempSensorKey } from "./nats/module-devices.js";
+export {
+  createLabEvent,
+  formatLabTerminalLine,
+  labEventsToCsv,
+  sensorSeries,
+} from "./nats/lab-log.js";
+export type { LabEvent, LabEventKind } from "./nats/lab-log.js";

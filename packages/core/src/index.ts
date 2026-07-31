@@ -18,3 +18,4 @@ export * from "./session/session-state.js";
 export * from "./session/neigh-parse.js";
 export * from "./nats/subjects.js";
 export * from "./nats/module-devices.js";
+export * from "./nats/lab-log.js";

@@ -2,7 +2,7 @@
  * Встроенный Industrial Service Control (без отдельного окна module_test).
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   DRINKX_HOSTS,
   FLOW_CALIBRATION_BREW_TIMEOUT_MS,
@@ -17,14 +17,17 @@ import {
   NATS_SUBJECTS,
   TEMP_SENSOR_LABELS,
   VALVE_LABELS,
+  createLabEvent,
   defaultHwid,
   expectedTempKeys,
   extractEnabledState,
   extractTempMap,
   extractWaterTotalPulses,
+  formatLabTerminalLine,
   heaterCommandSubject,
   heaterStatusSubject,
   heaterStopSubject,
+  labEventsToCsv,
   milkSystemValveNumbers,
   pumpCommandSubject,
   pumpPowerToPwm,
@@ -33,11 +36,13 @@ import {
   valveCommandSubject,
   valveStatusSubject,
   type DrinkxHost,
+  type LabEvent,
   type NatsConnectionInfo,
   type NatsMusterEntry,
   type TempSensorKey,
 } from "@service-monitor/core";
 import { ActionButton } from "../components/ActionButton";
+import { ModulesLabCharts } from "../components/ModulesLabCharts";
 import { SyrupFlashPanel } from "../components/SyrupFlashPanel";
 import { useComplexSession } from "../state/useComplexSession";
 
@@ -95,6 +100,11 @@ export function ModulesPage() {
   );
   const [calibLog, setCalibLog] = useState("");
   const [calibStatus, setCalibStatus] = useState("");
+  const [labEvents, setLabEvents] = useState<LabEvent[]>([]);
+  const [showCharts, setShowCharts] = useState(false);
+  const [termCmd, setTermCmd] = useState("");
+  const [termSubject, setTermSubject] = useState(NATS_SUBJECTS.status);
+  const terminalRef = useRef<HTMLPreElement | null>(null);
   const pollPaused = useRef(false);
   const pollGeneration = useRef(0);
   const autoNatsTried = useRef(false);
@@ -102,8 +112,62 @@ export function ModulesPage() {
     new Map()
   );
   const commandLock = useRef(Promise.resolve());
+  const lastSensorLog = useRef<Record<string, number>>({});
   const hwidRef = useRef(hwid);
   hwidRef.current = hwid;
+
+  const pushLab = useCallback(
+    (
+      kind: LabEvent["kind"],
+      name: string,
+      value: LabEvent["value"],
+      detail?: string
+    ) => {
+      const ev = createLabEvent({
+        kind,
+        module: host,
+        hwid: hwidRef.current,
+        name,
+        value,
+        detail,
+      });
+      setLabEvents((prev) => {
+        const next = [...prev, ev];
+        return next.length > 2000 ? next.slice(-2000) : next;
+      });
+    },
+    [host]
+  );
+
+  const pushSensorSample = useCallback(
+    (name: string, value: number) => {
+      const prev = lastSensorLog.current[name];
+      const now = Date.now();
+      const changed =
+        prev == null ||
+        Math.abs(prev - value) >= 0.15 ||
+        now - (lastSensorLog.current[`${name}__t`] ?? 0) > 5000;
+      if (!changed) return;
+      lastSensorLog.current[name] = value;
+      lastSensorLog.current[`${name}__t`] = now;
+      pushLab("sensor", name, Number(value.toFixed(2)));
+    },
+    [pushLab]
+  );
+
+  const terminalText = useMemo(
+    () =>
+      labEvents
+        .slice(-400)
+        .map(formatLabTerminalLine)
+        .join("\n"),
+    [labEvents]
+  );
+
+  useEffect(() => {
+    const el = terminalRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [terminalText]);
 
   const natsReady = session.connected && session.natsOnline;
   const live = nats.connected;
@@ -189,15 +253,23 @@ export function ModulesPage() {
       const statusRes = await req(NATS_SUBJECTS.status, {}, 3000);
       if (pollPaused.current || gen !== pollGeneration.current) return;
       if (statusRes.ok) {
-        setTemps(extractTempMap(statusRes.data, host));
+        const map = extractTempMap(statusRes.data, host);
+        setTemps(map);
+        for (const [key, val] of Object.entries(map)) {
+          if (typeof val === "number") {
+            pushSensorSample(key, val);
+          }
+        }
         if (host === "water") {
-          setWaterPulses(extractWaterTotalPulses(statusRes.data, "water"));
+          const pulses = extractWaterTotalPulses(statusRes.data, "water");
+          setWaterPulses(pulses);
+          if (pulses != null) pushSensorSample("waterTotalPulses", pulses);
         }
       }
     } catch (e) {
       console.warn("[modules] refresh", e);
     }
-  }, [host, live, req]);
+  }, [host, live, pushSensorSample, req]);
 
   useEffect(() => {
     if (!live) return;
@@ -376,12 +448,13 @@ export function ModulesPage() {
   async function toggleValve(baseId: string) {
     const next = !(valves[baseId] === true);
     setBusy(`valve-${baseId}`);
-    // Оптимистично — чтобы кнопка не «залипала» на null во время verify.
     setValves((v) => ({ ...v, [baseId]: next }));
+    pushLab("valve", baseId, next, next ? "open" : "close");
     try {
       await withCommandLock(async () => {
         const res = await ensureValve(baseId, next);
         if (!res.ok) {
+          pushLab("valve", baseId, null, res.error || "verify failed");
           setToast({
             text: res.error || `Клапан ${baseId}: не подтверждён`,
             error: true,
@@ -391,6 +464,8 @@ export function ModulesPage() {
             ...v,
             [baseId]: st.ok ? extractEnabledState(st.data) : null,
           }));
+        } else {
+          pushLab("valve", baseId, next, "verified");
         }
       });
     } catch (e) {
@@ -459,8 +534,10 @@ export function ModulesPage() {
         return;
       }
       setPumpOn(true);
+      pushLab("pump", "pump", true, `power%=${pumpPower} pwm=${pumpPowerToPwm(pumpPower)} ms=${pumpDuration}`);
       setTimeout(() => {
         setPumpOn(false);
+        pushLab("pump", "pump", false, "duration elapsed");
         pollPaused.current = false;
         void refreshDevices();
       }, pumpDuration + 200);
@@ -478,6 +555,7 @@ export function ModulesPage() {
     try {
       await req(pumpStopSubject(host));
       setPumpOn(false);
+      pushLab("pump", "pump", false, "stop");
     } catch (e) {
       setToast({ text: errText(e), error: true });
     } finally {
@@ -505,6 +583,7 @@ export function ModulesPage() {
         return;
       }
       setHeaters((h) => ({ ...h, [heaterId]: true }));
+      pushLab("heater", heaterId, true, `target=${heaterTarget}C`);
       const autoMs = Math.max(1, heaterAutoStopSec) * 1000;
       const timer = setTimeout(() => {
         void stopHeater(heaterId);
@@ -526,6 +605,7 @@ export function ModulesPage() {
     try {
       await req(heaterStopSubject(host, heaterId));
       setHeaters((h) => ({ ...h, [heaterId]: false }));
+      pushLab("heater", heaterId, false, "stop");
     } catch (e) {
       console.warn("[modules] stop heater", e);
     } finally {
@@ -845,14 +925,61 @@ export function ModulesPage() {
 
   const tempKeys = expectedTempKeys(host);
   const controlsDisabled = !live || busy !== null;
+  const chartSensorNames = useMemo(() => {
+    const names = new Set<string>();
+    for (const e of labEvents) {
+      if (e.kind === "sensor") names.add(e.name);
+    }
+    return [...names].slice(0, 8);
+  }, [labEvents]);
+
+  function exportLabLog() {
+    const csv = labEventsToCsv(labEvents);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `modules-lab-${host}-${Date.now()}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    pushLab("system", "export", labEvents.length, a.download);
+    setToast({ text: `Лог выгружен (${labEvents.length} событий)` });
+  }
+
+  async function runTerminalCommand() {
+    const subject = termSubject.trim();
+    if (!subject) return;
+    let payload: Record<string, unknown> = {};
+    if (termCmd.trim()) {
+      try {
+        payload = JSON.parse(termCmd) as Record<string, unknown>;
+      } catch {
+        setToast({ text: "payload должен быть JSON", error: true });
+        return;
+      }
+    }
+    pushLab("command", subject, "request", termCmd || "{}");
+    const res = await req(subject, payload, 5000);
+    if (res.ok) {
+      pushLab(
+        "command",
+        subject,
+        "ok",
+        JSON.stringify(res.data).slice(0, 240)
+      );
+    } else {
+      pushLab("command", subject, "error", res.error);
+      setToast({ text: res.error, error: true });
+    }
+  }
 
   return (
     <div className="stack">
       <div className={`panel${warn ? " panel-warn" : ""}`}>
-        <h2>Модули DrinkX</h2>
+        <h2>Modules Lab</h2>
         <p className="lead">
-          Управление клапанами / насосом / нагревателями прямо в приложении —
-          отдельное окно <code>module_test</code> не нужно.
+          Слева — исполнители (клапаны / насос / ТЭНы), справа — датчики live,
+          снизу — терминал и лог. Графики и CSV — для разбора выезда.
         </p>
         <div className="row">
           <span className={`badge${natsReady ? " on" : " danger"}`}>
@@ -863,6 +990,7 @@ export function ModulesPage() {
           <span className={`badge${live ? " on" : ""}`}>
             {live ? nats.message : "NATS клиент выкл"}
           </span>
+          <span className="badge">{labEvents.length} evt</span>
         </div>
         {toast ? (
           <div className={`toast${toast.error ? " error" : ""}`}>
@@ -889,6 +1017,27 @@ export function ModulesPage() {
             onClick={() => void resolveMuster()}
           >
             Muster
+          </ActionButton>
+          <ActionButton
+            disabled={labEvents.length === 0}
+            onClick={() => setShowCharts((v) => !v)}
+          >
+            {showCharts ? "Скрыть графики" : "Графики"}
+          </ActionButton>
+          <ActionButton
+            disabled={labEvents.length === 0}
+            onClick={() => exportLabLog()}
+          >
+            Выгрузить лог CSV
+          </ActionButton>
+          <ActionButton
+            disabled={labEvents.length === 0}
+            onClick={() => {
+              setLabEvents([]);
+              pushLab("system", "clear", 0);
+            }}
+          >
+            Очистить лог
           </ActionButton>
           <label className="muted">
             Модуль{" "}
@@ -925,6 +1074,15 @@ export function ModulesPage() {
         </div>
       </div>
 
+      {showCharts ? (
+        <div className="panel">
+          <h2>Графики датчиков</h2>
+          <ModulesLabCharts events={labEvents} sensorNames={chartSensorNames} />
+        </div>
+      ) : null}
+
+      <div className="lab-grid">
+        <div className="lab-col">
       {host === "milk" ? (
         <div className="panel">
           <h2>Молочные клапана (debug)</h2>
@@ -1182,27 +1340,80 @@ export function ModulesPage() {
           ) : null}
         </div>
       ) : null}
+        </div>
+
+        <div className="lab-col">
+      <div className="panel">
+        <h2>Датчики · {host}</h2>
+        <div className="sensor-list">
+          {tempKeys.map((key) => (
+            <div key={key} className="sensor-row">
+              <span>{TEMP_SENSOR_LABELS[key]}</span>
+              <span className="metric">
+                {temps[key] != null ? `${temps[key]!.toFixed(1)} °C` : "—"}
+              </span>
+            </div>
+          ))}
+          {host === "water" ? (
+            <div className="sensor-row">
+              <span>Total pulses</span>
+              <span className="metric">
+                {waterPulses != null ? waterPulses : "—"}
+              </span>
+            </div>
+          ) : null}
+          <div className="sensor-row">
+            <span>Насос</span>
+            <span className="metric">
+              {pumpOn == null ? "?" : pumpOn ? "ON" : "OFF"} · {pumpPower}%
+            </span>
+          </div>
+          {HEATER_IDS.map((hid) => (
+            <div key={hid} className="sensor-row">
+              <span>{HEATER_LABELS[hid]}</span>
+              <span className="metric">
+                {heaters[hid] == null
+                  ? "?"
+                  : heaters[hid]
+                    ? "ON"
+                    : "OFF"}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+        </div>
+      </div>
 
       <div className="panel">
-        <h2>Температуры</h2>
-        <table className="temps-table">
-          <thead>
-            <tr>
-              <th>Датчик</th>
-              <th>°C</th>
-            </tr>
-          </thead>
-          <tbody>
-            {tempKeys.map((key) => (
-              <tr key={key}>
-                <td>{TEMP_SENSOR_LABELS[key]}</td>
-                <td className="metric">
-                  {temps[key] != null ? temps[key]!.toFixed(1) : "—"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <h2>Терминал / журнал</h2>
+        <pre className="lab-terminal" ref={terminalRef}>
+          {terminalText || "— лог пуст —"}
+        </pre>
+        <div className="lab-terminal-input">
+          <input
+            value={termSubject}
+            disabled={!live}
+            onChange={(e) => setTermSubject(e.target.value)}
+            placeholder="NATS subject"
+            style={{ maxWidth: 280 }}
+          />
+          <input
+            value={termCmd}
+            disabled={!live}
+            onChange={(e) => setTermCmd(e.target.value)}
+            placeholder='JSON payload, напр. {}'
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void runTerminalCommand();
+            }}
+          />
+          <ActionButton
+            disabled={controlsDisabled}
+            onClick={() => void runTerminalCommand()}
+          >
+            Send
+          </ActionButton>
+        </div>
       </div>
 
       <SyrupFlashPanel

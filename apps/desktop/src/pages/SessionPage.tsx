@@ -125,13 +125,24 @@ export function SessionPage() {
               {busy ? "Подключение…" : "Подключить"}
             </ActionButton>
           ) : (
-            <ActionButton
-              helpId="session.connect"
-              disabled={busy}
-              onClick={() => void onDisconnect()}
-            >
-              Отключить
-            </ActionButton>
+            <>
+              <ActionButton
+                helpId="session.connect"
+                disabled={busy}
+                onClick={() => void onDisconnect()}
+              >
+                Отключить
+              </ActionButton>
+              {/ложная сессия|переподключ/i.test(session.message) ? (
+                <ActionButton
+                  variant="primary"
+                  disabled={busy}
+                  onClick={() => void onConnect()}
+                >
+                  {busy ? "…" : "Переподключить"}
+                </ActionButton>
+              ) : null}
+            </>
           )}
           <span className={`badge${active ? " on" : " danger"}`}>
             {session.message}

@@ -54,9 +54,21 @@
 - Каркас `apps/android` + контракт native bridge (`docs/ANDROID.md`)
 - electron-builder релиз-пайплайн — отложен
 
+## Stage 7 — ComplexOS + Lab terminal / complex telemetry
+
+- Вкладка **ComplexOS**: `complexos.core.*` / dashboard dump / cleaning-config, pause, transitions, dismiss alerts, Big Wash через `devices.cm.action`, grace/force restart; запись timings через `coffeemachine.update-config` (после сервисного пароля)
+- Сворачиваемая боковая навигация; `?` на кнопках и параметрах ComplexOS / Lab
+- **Конфиг**: блок cleaning timings ComplexOS рядом с drinkx.json
+- Modules Lab:
+  - parallel complex status (tuple replies milk/coffee/water), valve verify, chart grid по модулям
+  - треки модулей/датчиков, CSV лог, пакеты клапанов, прогрев тенов, реверс насоса (если cm-drv поддерживает)
+  - **Терминал**: крупные subject + JSON textarea; пресеты с ассоциациями subject→payload; свои ★ + удаление; sticky scroll; Enter / Ctrl+Enter; правила payload
+- Core: `nats/complexos-subjects.ts`, `nats/complex-status.ts`, `nats/terminal-presets.ts`, `nats/chart-layout.ts`, `nats/valve-packages.ts`, `nats/heater-warmup.ts`
+- Help: статья «NATS subjects и payload»
+
 ## Дальше
 
 - Полный port `flash_obraz` (ansible) in-app
-- NATS cleaning / расширенный brew UI
+- Расширенный brew UI / безопасные lab-сценарии поверх terminal presets
 - Android native SSH/NATS runtime
 - Подпись кода (Apple notarization / Windows Authenticode) для публичных релизов

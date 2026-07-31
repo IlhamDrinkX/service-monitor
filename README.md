@@ -14,21 +14,24 @@
 | **4** | drinkx.json + code hints + diff + discovery MAC | готово |
 | **5** | Встроенный NATS, сироп `dozator`, restart cm-drv | готово |
 | **6** | Сироп UI, auto NATS, flash partA/B, Android stub | готово |
+| **7** | ComplexOS, Lab terminal presets, complex status/charts | готово |
 
 Подробнее: [`docs/STAGES.md`](docs/STAGES.md). Android: [`docs/ANDROID.md`](docs/ANDROID.md).  
-Сборка / GitHub Release: [`docs/BUILD_AND_PUBLISH.md`](docs/BUILD_AND_PUBLISH.md).
+Сборка / GitHub Release: [`docs/BUILD_AND_PUBLISH.md`](docs/BUILD_AND_PUBLISH.md).  
+Полевая шпаргалка NATS / ComplexOS: [`docs/FIELD_NATS.md`](docs/FIELD_NATS.md).
 
 ## Структура
 
 ```
 service-monitor/
-  packages/core/     # домен, SSH snippet, WriteGate, help, hints, NATS subjects
+  packages/core/     # домен, SSH, WriteGate, help, NATS subjects / ComplexOS / terminal presets
   apps/desktop/      # Electron + React (тёмная тема)
   apps/android/      # каркас + bridge contract (без native runtime)
   scripts/           # install-windows / install-macos (бета), bootstrap.*
   docs/STAGES.md
   docs/ANDROID.md
   docs/BUILD_AND_PUBLISH.md
+  docs/FIELD_NATS.md
 ```
 
 ## Запуск
@@ -82,11 +85,19 @@ npm test
 
 ## Что уже в UI
 
-- Тёмная тема, навигация с `?`-хелпами
-- Раздел **Справка** (приложение + как работает комплекс)
+- Тёмная тема, сворачиваемая навигация с `?`-хелпами
+- Раздел **Справка** (приложение, архитектура комплекса, NATS subjects/payload)
 - **Доступ**: ключ, pubkey для ERP, snippet / запись ssh config (forwards `:8000` на модулях)
 - **Настройки**: Debug, сервисный пароль (отдельный от ERP)
 - **Сессия**: Connect SSH (общий туннель + NATS :14222), дашборд/киоск/графики
-- **Модули**: DrinkX NATS (auto-connect), сироп Modbus, flash partA/B; legacy flash_obraz
-- **Конфиг**: drinkx.json + restart cm-drv
+- **Модули (Lab)**: DrinkX NATS (auto-connect), клапаны/насос/тены/flush, треки датчиков, графики комплекса, сироп Modbus, flash partA/B
+- **Терминал NATS**: пресеты subject/payload с ассоциациями, свои ★ + удаление, крупные поля, Enter / Ctrl+Enter, правила payload из ERP
+- **ComplexOS**: status / dump / pause / режимы / alerts, Big Wash, cleaning timings (runtime), grace/force restart (после сервисного пароля)
+- **Конфиг**: drinkx.json + timings мойки ComplexOS + restart cm-drv
 - Красная подсветка, если сессия не установлена или протухла
+
+## Полевые заметки (Stage 7)
+
+- Опасные команды ComplexOS и запись timings требуют разблокировки в **Настройки** (сервисный пароль приложения, не ERP).
+- Payload brew: `qty` у coffee/milk — **миллисекунды насоса**, не мл; facade `hwid: "dx"`.
+- Источники subjects в ERP release: `cm-drv` expose list, `complexos/api/dashboard-api.ts`, Dashboard → Logs.

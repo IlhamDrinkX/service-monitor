@@ -19,7 +19,7 @@ import {
   type ComplexSessionSnapshot,
   type ErpSalesPoint,
 } from "@service-monitor/core";
-import { verifyServicePassword } from "@service-monitor/core/security/password";
+import { verifyServicePassword, hashServicePassword } from "@service-monitor/core/security/password";
 import { sshSessionManager } from "./ssh-session-manager";
 import {
   readDrinkxJson,
@@ -386,6 +386,10 @@ function registerIpc(): void {
       console.log("[security] service password ok");
     }
     return { ok };
+  });
+
+  ipcMain.handle("profiles:hashServicePassword", (_e, password: string) => {
+    return hashServicePassword(String(password ?? ""));
   });
 
   // ---- Stage 3: общая SSH-сессия комплекса ---------------------------------

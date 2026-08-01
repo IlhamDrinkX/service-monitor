@@ -78,6 +78,9 @@ describe("stage5 / module-devices", () => {
       extractPumpPowerPercent({ result: { power: 255, enabled: true } }),
       100
     );
+    // ERP reverse → negative speed/power; UI shows magnitude %
+    assert.equal(extractPumpPowerPercent({ power: -40, enabled: true }), 40);
+    assert.equal(extractPumpPowerPercent({ power: -200 }), 78);
     assert.equal(extractPumpPowerPercent({}), null);
   });
 

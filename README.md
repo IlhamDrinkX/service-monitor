@@ -16,6 +16,7 @@
 | **6** | Сироп UI, auto NATS, flash partA/B, Android stub | готово |
 | **7** | ComplexOS, Lab terminal presets, complex status/charts | готово |
 | **8** | Lab scenarios, Cos orders/alerts bus, Brew Lab | готово |
+| **9** | LabTelemetry, DX UI R/L_IS, actuator races, water charts | готово (dev2) |
 
 Подробнее: [`docs/STAGES.md`](docs/STAGES.md). Android: [`docs/ANDROID.md`](docs/ANDROID.md).  
 Сборка / GitHub Release: [`docs/BUILD_AND_PUBLISH.md`](docs/BUILD_AND_PUBLISH.md).  

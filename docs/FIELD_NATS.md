@@ -20,6 +20,17 @@
 | Запись timings | `coffeemachine.update-config` | runtime merge, не osconfig ERP |
 | Grace / Force restart | `complexos.core.grace-restart` / `restart` | сервисный пароль |
 
+## Modules Lab — телеметрия (Stage 9)
+
+| Показатель | Источник |
+|------------|----------|
+| Температуры / pressure / pulses | NATS `coffeemachine.status` (many) |
+| Мощность насоса % | NATS `pumps.status` (+ optimistic cmd) |
+| R_IS / L_IS | HTTP DX UI `:8000` (туннель 8082/8083) — вольты АЦП |
+| ШИМ тэнов | оценка `(target−temp)×1.5` clamp 25–75; **не** DX graph |
+
+Опрос: `LabTelemetryController` — NATS ~1.1s, DX ~1.5s отдельно. Pause на команду не стопит DX.
+
 ## Modules Lab — сценарии и Brew
 
 - **Сценарии** шлют **реальные ERP payload** (не mock): status, micro-rinse / milk rinse (`coffeemachine.milkrinse!`), Stop CM, pump reverse

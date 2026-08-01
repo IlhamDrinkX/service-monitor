@@ -26,9 +26,7 @@ import {
   defaultHwid,
   expectedTempKeys,
   extractEnabledState,
-  extractPumpCurrent,
   extractTempMap,
-  extractWaterPressure,
   extractWaterTotalPulses,
   estimateHeaterPwmPercent,
   formatLabTerminalLine,
@@ -38,7 +36,6 @@ import {
   isTelemetryStale,
   labEventsToCsv,
   milkSystemValveNumbers,
-  parseComplexStatusTuple,
   pumpCommandPayload,
   pumpCommandSubject,
   pumpStopSubject,
@@ -703,91 +700,6 @@ export function ModulesPage() {
       }
     },
     []
-  );
-
-  const ingestStatusSensors = useCallback(
-    (target: DrinkxHost, statusData: unknown, updateUi: boolean) => {
-      const map = extractTempMap(statusData, target);
-      if (updateUi && hostRef.current === target) setTemps(map);
-      if (Object.keys(map).length > 0) {
-        setComplexTemps((prev) => ({
-          ...prev,
-          [target]: { ...prev[target], ...map },
-        }));
-      }
-      for (const [key, val] of Object.entries(map)) {
-        if (typeof val === "number") {
-          pushSensorSample(target, key, val);
-        }
-      }
-      if (target === "water") {
-        const pulses = extractWaterTotalPulses(statusData, "water");
-        if (pulses != null) {
-          setWaterPulses(pulses);
-          pushSensorSample("water", "waterTotalPulses", pulses, 1);
-        }
-        const pressure = extractWaterPressure(statusData, "water");
-        if (pressure != null) {
-          setWaterPressure(pressure);
-          pushSensorSample("water", "waterPressure", pressure, 0.02);
-        }
-      }
-      if (target === "milk" || target === "coffee") {
-        const current = extractPumpCurrent(statusData);
-        if (current != null) {
-          setPumpCurrentByHost((prev) => ({ ...prev, [target]: current }));
-          pushSensorSample(target, "pumpCurrent", current, 0.02);
-        }
-      }
-    },
-    [pushSensorSample]
-  );
-
-  const applyComplexTuple = useCallback(
-    (replies: unknown[]) => {
-      const tuple = parseComplexStatusTuple(replies);
-      const active = hostRef.current;
-      for (const h of DRINKX_HOSTS) {
-        const snap = tuple.hosts[h];
-        if (snap.sensorCount === 0) continue;
-        if (Object.keys(snap.temps).length > 0) {
-          setComplexTemps((prev) => ({
-            ...prev,
-            [h]: { ...prev[h], ...snap.temps },
-          }));
-          if (h === active) setTemps((prev) => ({ ...prev, ...snap.temps }));
-          for (const [key, val] of Object.entries(snap.temps)) {
-            if (typeof val === "number") {
-              pushSensorSample(h, key, val);
-            }
-          }
-        }
-        if (h === "water") {
-          if (snap.waterPulses != null) {
-            setWaterPulses(snap.waterPulses);
-            pushSensorSample("water", "waterTotalPulses", snap.waterPulses, 1);
-          }
-          if (snap.waterPressure != null) {
-            setWaterPressure(snap.waterPressure);
-            pushSensorSample(
-              "water",
-              "waterPressure",
-              snap.waterPressure,
-              0.02
-            );
-          }
-        }
-        if ((h === "milk" || h === "coffee") && snap.pumpCurrent != null) {
-          setPumpCurrentByHost((prev) => ({
-            ...prev,
-            [h]: snap.pumpCurrent,
-          }));
-          pushSensorSample(h, "pumpCurrent", snap.pumpCurrent, 0.02);
-        }
-      }
-      return tuple;
-    },
-    [pushSensorSample]
   );
 
   async function withCommandLock<T>(fn: () => Promise<T>): Promise<T> {
@@ -1455,6 +1367,7 @@ export function ModulesPage() {
     try {
       pollPaused.current = true;
       pollGeneration.current += 1;
+      labTelemetryRef.current?.pause();
 
       for (let i = 0; i < order.length; i++) {
         if (ac.signal.aborted) {
@@ -1571,6 +1484,7 @@ export function ModulesPage() {
     } finally {
       warmupAbort.current = null;
       pollPaused.current = false;
+      labTelemetryRef.current?.resume();
       setBusy(null);
       void refreshDevices();
     }
@@ -1608,6 +1522,7 @@ export function ModulesPage() {
         : "milkInput";
 
     pollPaused.current = true;
+    labTelemetryRef.current?.pause();
     setBusy("flush");
     setToast(null);
     try {
@@ -1616,7 +1531,11 @@ export function ModulesPage() {
         await req(valveCommandSubject(host, "drain", false));
       }
       const duration = 5000;
-      await req(pumpCommandSubject(host), { duration });
+      // ERP default power=100 PWM (~39%) если не передать — шлём полный ход.
+      await req(
+        pumpCommandSubject(host),
+        pumpCommandPayload({ durationMs: duration, powerPercent: 100 })
+      );
       await sleep(duration);
       await req(valveCommandSubject(host, openValve, false));
       if (MODULE_VALVES[host].includes("drain")) {
@@ -1629,6 +1548,7 @@ export function ModulesPage() {
     } finally {
       setBusy(null);
       pollPaused.current = false;
+      labTelemetryRef.current?.resume();
     }
   }
 
@@ -1639,6 +1559,7 @@ export function ModulesPage() {
       return;
     }
     pollPaused.current = true;
+    labTelemetryRef.current?.pause();
     setBusy("foam");
     try {
       if (MODULE_VALVES[host].includes("drain")) {
@@ -1676,6 +1597,7 @@ export function ModulesPage() {
     } finally {
       setBusy(null);
       pollPaused.current = false;
+      labTelemetryRef.current?.resume();
     }
   }
 
@@ -1820,6 +1742,7 @@ export function ModulesPage() {
     });
     smLog("info", "brew-lab", "start", payload);
     pollPaused.current = true;
+    labTelemetryRef.current?.pause();
     setBusy("brew-lab");
     pushLab("command", NATS_SUBJECTS.brew, "request", JSON.stringify(payload));
     try {
@@ -1842,6 +1765,7 @@ export function ModulesPage() {
     } finally {
       setBusy(null);
       pollPaused.current = false;
+      labTelemetryRef.current?.resume();
     }
   }
 
@@ -1982,6 +1906,7 @@ export function ModulesPage() {
     }
 
     pollPaused.current = true;
+    labTelemetryRef.current?.pause();
     setBusy("calib");
     const lines = [
       "Калибровка flowmeter · water",
@@ -2043,6 +1968,7 @@ export function ModulesPage() {
     } finally {
       setBusy(null);
       pollPaused.current = false;
+      labTelemetryRef.current?.resume();
       void refreshDevices();
     }
   }

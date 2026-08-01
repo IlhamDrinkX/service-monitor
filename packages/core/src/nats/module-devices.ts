@@ -180,9 +180,11 @@ export function extractPumpPowerPercent(
   const raw = r.power ?? r.speed ?? r.pwm ?? r.Power ?? r.Speed;
   const n = Number(raw);
   if (!Number.isFinite(n)) return null;
-  // cm-drv отдаёт уже % (speed/2.55); если вдруг PWM — нормализуем.
+  // cm-drv отдаёт уже % (speed/2.55); reverse → speed < 0 → power отрицательный.
   if (n > 100 && n <= 255) return Math.round((n / 255) * 100);
-  if (n < 0) return 0;
+  if (n < -100 && n >= -255) return Math.round((Math.abs(n) / 255) * 100);
+  // UI показывает величину %; направление — отдельно (reverse).
+  if (n < 0) return Math.round(Math.min(100, Math.abs(n)));
   return Math.round(Math.min(100, n));
 }
 

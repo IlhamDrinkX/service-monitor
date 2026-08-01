@@ -310,7 +310,7 @@ export const CONTROL_HELPS: Record<string, ControlHelp> = {
   "modules.flush": {
     id: "modules.flush",
     title: "Flush",
-    body: "Сервисный пролив молока или воды через клапаны/насос (короткий цикл).",
+    body: "Короткий пролив: открыть milkInput/waterInput → pumps.*! duration=5с power=100% (PWM 255; без power ERP взял бы default 100≈39%) → закрыть клапан. Пауза NATS на цикл; DX ток продолжает опрос.",
   },
   "lab.scenarios": {
     id: "lab.scenarios",
@@ -554,9 +554,10 @@ export const HELP_ARTICLES: HelpArticle[] = [
       "",
       "Почему не было тока насоса / ШИМ тэнов:",
       "coffeemachine.status / getStatus() НЕ отдаёт pump_R_IS и PWM —",
-      "они в HTTP DX UI :8000 (temps + pid graph). Туннель :8082 → milk .44.",
-      "Service Monitor опрашивает DX UI из Electron main (без CORS).",
-      "При reverse R_IS не отрицательный (АЦП Type:V).",
+      "ток: HTTP DX UI :8000 (temps). ШИМ тэнов в Lab: оценка PidClassic.start",
+      "clamp(25…75, (target−temp)×1.5) — DX graph lastlog после brew залипает.",
+      "Опрос: LabTelemetry (NATS ~1.1s + DX ~1.5s). Pause команды не стопит DX.",
+      "Туннель :8082 → milk .44. При reverse R_IS не отрицательный (АЦП Type:V).",
       "",
       "Частая полевая ловушка: milk Pi на 192.168.1.33 вместо .44.",
       "NATS через complexos может работать, а :8082/графики — пустые.",
@@ -564,6 +565,7 @@ export const HELP_ARTICLES: HelpArticle[] = [
       "Проверьте leases роутера / static IP, затем «Графики milk» на Сессии.",
       "",
       "Brew Lab: qty в миллисекундах насоса, не мл. Пароль + confirm.",
+      "Water charts: pressure + total_pulses пишутся в ряды каждый NATS tick.",
     ].join("\n"),
   },
   {

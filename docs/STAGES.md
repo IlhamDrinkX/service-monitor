@@ -76,9 +76,25 @@
 - Навигация: **Дозатор** (syrup Modbus/flash + flash_obraz) вынесена из Modules
 - Help: статья «Сценарии Lab и milkrinse»
 
+## Stage 9 — LabTelemetry / DX UI currents / actuator stability (dev2)
+
+- Один владелец опроса: `LabTelemetryController` + `useLabTelemetry`
+  - NATS ~1.1s: status many + valves + pumps + heaters
+  - DX UI ~1.5s: только `pump_R_IS` / `pump_L_IS` (HTTP :8000 / туннель; SSH fallback)
+  - `pause` abort только NATS; DX ток не стопорится на START насоса
+- Heater PWM в Lab = оценка PidClassic.start (25–75%), не DX graph lastlog
+- Pump START/STOP: session cancel, optimistic power %, burst DX
+- Water charts: `waterPressure` + `waterTotalPulses` в события графиков
+- Flush шлёт явный `power` 100% (не ERP default PWM 100)
+- Reverse status power: величина % (отрицательный speed ERP)
+- IPC: `dxUi:pumpCurrents`, `profiles:hashServicePassword`
+- Локальные требования агента: `.agent-notes/REQUIREMENTS.md` (gitignored)
+
 ## Дальше
 
 - Полный port `flash_obraz` (ansible) in-app
 - Расширенный brew UI (tweaks/menu items) поверх Brew Lab
+- Split ModulesPage (terminal / scenarios / actuators)
+- LabTelemetryController unit tests
 - Android native SSH/NATS runtime
 - Подпись кода (Apple notarization / Windows Authenticode) для публичных релизов

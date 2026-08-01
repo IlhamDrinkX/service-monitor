@@ -10,12 +10,26 @@
 |----------|-------------------|------------|
 | Status | `complexos.core.status` | mode, pause, alerts, transitions |
 | Dump devices | `complexos.dashboard.dump-devices` | взять `coffeeMachineId` (часто `dx`) |
+| Orders | `complexos.dashboard.orders` | waiting / progress / ready / taked |
 | Cleaning config | `complexos.dashboard.cleaning-config` | чтение timings |
 | Pause / Resume | `complexos.core.pause` | `{ pause: true\|false }` |
 | Transition | `complexos.core.transition` | `{ transition }` из status |
-| Big Wash | `complexos.devices.cm.action` | нужен сервисный пароль |
+| Big Wash | `complexos.devices.cm.action` | `start-cleaning` · сервисный пароль |
+| Stop CM | `complexos.devices.cm.action` | `{ action: "stop" }` · fallback `coffeemachine.stop` |
+| Live alerts | `complexos.bus.alertCreated/Cleared/helpNeeded` | авто refresh status |
 | Запись timings | `coffeemachine.update-config` | runtime merge, не osconfig ERP |
 | Grace / Force restart | `complexos.core.grace-restart` / `restart` | сервисный пароль |
+
+## Modules Lab — сценарии и Brew
+
+- **Сценарии** шлют **реальные ERP payload** (не mock): status, micro-rinse / milk rinse (`coffeemachine.milkrinse!`), Stop CM, pump reverse
+- Micro: `tubesLength: 1000` ≈ 150 с forward (ComplexOS microrinse) + reverse-циклы DrinkX
+- Milk rinse (lab): `tubesLength: 1500` ≈ 4 мин; не Big Wash
+- Во время rinse опрос DX UI (:8000 / :8082) даёт **pump_R_IS в вольтах** (NATS status его не отдаёт); reverse **не** отрицательный
+- **Stop CM** доступен во время rinse (не блокируется busy сценария)
+- **Brew Lab**: форма parts → `coffeemachine.brew`; **qty = мс насоса**; unlock + confirm
+- Сироп / flash_obraz — вкладка **Дозатор** (не Modules)
+- Опасные сценарии и brew — после сервисного пароля в Настройках
 
 ## Терминал (Модули)
 

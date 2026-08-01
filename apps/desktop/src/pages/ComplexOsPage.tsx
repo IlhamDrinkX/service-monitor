@@ -15,6 +15,7 @@ import {
 import { ActionButton } from "../components/ActionButton";
 import { HelpTip } from "../components/HelpTip";
 import { onEnterNavigate } from "../lib/form-nav";
+import { safeDesktopCall, smLog } from "../lib/sm-log";
 import { useComplexSession } from "../state/useComplexSession";
 
 function errText(e: unknown): string {
@@ -34,6 +35,34 @@ function pretty(data: unknown): string {
   } catch {
     return String(data);
   }
+}
+
+function shortId(id: unknown): string {
+  const s = String(id ?? "");
+  if (s.length <= 10) return s || "—";
+  return `${s.slice(0, 6)}…${s.slice(-4)}`;
+}
+
+type OrderRow = {
+  orderId?: string;
+  number?: number | string;
+  status?: string;
+  menuItemName?: string;
+};
+
+function asOrderRows(list: unknown[] | undefined): OrderRow[] {
+  if (!Array.isArray(list)) return [];
+  return list.map((item) => {
+    if (!item || typeof item !== "object") return {};
+    const o = item as Record<string, unknown>;
+    return {
+      orderId: typeof o.orderId === "string" ? o.orderId : undefined,
+      number: (o.number as number | string | undefined) ?? undefined,
+      status: typeof o.status === "string" ? o.status : undefined,
+      menuItemName:
+        typeof o.menuItemName === "string" ? o.menuItemName : undefined,
+    };
+  });
 }
 
 export function ComplexOsPage() {
@@ -65,7 +94,15 @@ export function ComplexOsPage() {
   const [cmId, setCmId] = useState("");
   const [troubles, setTroubles] = useState<unknown>(null);
   const [showDump, setShowDump] = useState(false);
+  const [orders, setOrders] = useState<{
+    waitingOrders?: unknown[];
+    progressOrders?: unknown[];
+    readyOrders?: unknown[];
+    takedOrders?: unknown[];
+  } | null>(null);
+  const [busLive, setBusLive] = useState(false);
   const autoTried = useRef(false);
+  const refreshStatusRef = useRef<() => Promise<void>>(async () => undefined);
 
   useEffect(() => {
     void window.desktop.natsInfo().then(setNats).catch(() => undefined);
@@ -132,14 +169,16 @@ export function ComplexOsPage() {
     return false;
   }
 
-  async function refreshStatus() {
+  async function refreshStatus(opts?: { silent?: boolean }) {
     if (!(await ensureNats())) return;
-    setBusy("status");
-    setToast(null);
+    if (!opts?.silent) {
+      setBusy("status");
+      setToast(null);
+    }
     try {
       const res = await req(COMPLEXOS_SUBJECTS.status, {}, 5_000);
       if (!res.ok) {
-        setToast({ text: res.error, error: true });
+        if (!opts?.silent) setToast({ text: res.error, error: true });
         return;
       }
       const body =
@@ -149,11 +188,118 @@ export function ComplexOsPage() {
               | undefined) ?? (res.data as Record<string, unknown>)
           : null;
       setOsStatus(body);
-      setToast({ text: "status ok" });
+      if (!opts?.silent) setToast({ text: "status ok" });
     } finally {
-      setBusy(null);
+      if (!opts?.silent) setBusy(null);
     }
   }
+  refreshStatusRef.current = () => refreshStatus({ silent: true });
+
+  async function refreshOrders(opts?: { silent?: boolean }) {
+    if (!(await ensureNats())) return;
+    if (!opts?.silent) setBusy("orders");
+    try {
+      const res = await req(COMPLEXOS_SUBJECTS.orders, {}, 8_000);
+      if (!res.ok) {
+        if (!opts?.silent) setToast({ text: res.error, error: true });
+        return;
+      }
+      const body =
+        res.data && typeof res.data === "object"
+          ? ((res.data as Record<string, unknown>).result as Record<
+              string,
+              unknown
+            >) ?? (res.data as Record<string, unknown>)
+          : null;
+      setOrders(
+        (body as {
+          waitingOrders?: unknown[];
+          progressOrders?: unknown[];
+          readyOrders?: unknown[];
+          takedOrders?: unknown[];
+        }) ?? null
+      );
+      if (!opts?.silent) setToast({ text: "orders ok" });
+    } finally {
+      if (!opts?.silent) setBusy(null);
+    }
+  }
+
+  useEffect(() => {
+    if (!live) {
+      setBusLive(false);
+      void safeDesktopCall(
+        "natsUnsubscribeBus",
+        () =>
+          window.desktop.natsUnsubscribeBus?.() ??
+          Promise.resolve({ ok: true as const }),
+        { ok: true as const }
+      );
+      return;
+    }
+    let cancelled = false;
+    smLog("info", "complexos", "subscribe alert bus");
+    void (async () => {
+      const sub = await safeDesktopCall(
+        "natsSubscribeBus",
+        () =>
+          window.desktop.natsSubscribeBus?.([
+            COMPLEXOS_SUBJECTS.alertCreated,
+            COMPLEXOS_SUBJECTS.alertCleared,
+            COMPLEXOS_SUBJECTS.helpNeeded,
+          ]) ??
+          Promise.resolve({
+            ok: false as const,
+            error: "natsSubscribeBus missing",
+          }),
+        { ok: false as const, error: "natsSubscribeBus missing" }
+      );
+      if (cancelled) return;
+      if (sub.ok) {
+        setBusLive(true);
+        smLog("info", "complexos", "alert bus ON", {
+          subjects: "subjects" in sub ? sub.subjects : undefined,
+        });
+      } else {
+        setBusLive(false);
+        smLog("warn", "complexos", "alert bus failed", sub);
+      }
+    })();
+    const off =
+      typeof window.desktop.onNatsBus === "function"
+        ? window.desktop.onNatsBus((msg) => {
+            const short = msg.subject.split(".").pop() ?? msg.subject;
+            smLog("info", "complexos", `bus ${short}`);
+            setToast({ text: `bus · ${short}` });
+            void refreshStatusRef.current();
+          })
+        : () => undefined;
+    return () => {
+      cancelled = true;
+      off();
+      void safeDesktopCall(
+        "natsUnsubscribeBus",
+        () =>
+          window.desktop.natsUnsubscribeBus?.() ??
+          Promise.resolve({ ok: true as const }),
+        { ok: true as const }
+      );
+      setBusLive(false);
+    };
+  }, [live]);
+
+  useEffect(() => {
+    if (!live) return;
+    smLog("info", "complexos", "orders auto-poll start");
+    const id = window.setInterval(() => {
+      void refreshOrders({ silent: true });
+    }, 7_000);
+    return () => {
+      clearInterval(id);
+      smLog("info", "complexos", "orders auto-poll stop");
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- poll while live
+  }, [live]);
 
   async function refreshDump() {
     if (!(await ensureNats())) return;
@@ -328,6 +474,36 @@ export function ComplexOsPage() {
     }
   }
 
+  async function stopCm() {
+    if (!requireUnlock()) return;
+    if (!(await ensureNats())) return;
+    const id = cmId.trim() || "dx";
+    if (!window.confirm(`Stop CM (${id})? Оборвёт brew/мойку.`)) return;
+    setBusy("stop-cm");
+    try {
+      const viaOs = await req(
+        COMPLEXOS_SUBJECTS.cmAction,
+        { action: "stop", coffeeMachineId: id },
+        10_000
+      );
+      if (viaOs.ok) {
+        setToast({ text: "stop через ComplexOS" });
+        return;
+      }
+      const direct = await req("coffeemachine.stop", { hwid: id }, 8_000);
+      if (!direct.ok) {
+        setToast({
+          text: `OS: ${viaOs.error}; direct: ${direct.error}`,
+          error: true,
+        });
+        return;
+      }
+      setToast({ text: "coffeemachine.stop ok" });
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function graceRestart() {
     if (!requireUnlock()) return;
     if (!(await ensureNats())) return;
@@ -489,6 +665,17 @@ export function ComplexOsPage() {
           >
             Troubles
           </ActionButton>
+          <ActionButton
+            helpId="cos.orders"
+            disabled={controlsDisabled}
+            onClick={() => void refreshOrders()}
+          >
+            Orders
+          </ActionButton>
+          <span className={`badge${busLive ? " on" : ""}`}>
+            <HelpTip controlId="cos.alertBus" />
+            {busLive ? "alert bus ON" : "alert bus off"}
+          </span>
         </div>
         {toast ? (
           <div className={`toast${toast.error ? " error" : ""}`}>
@@ -581,6 +768,56 @@ export function ComplexOsPage() {
       </div>
 
       <div className="panel panel-compact">
+        <h2 className="row" style={{ gap: 8, alignItems: "center" }}>
+          Orders
+          <HelpTip controlId="cos.orders" />
+        </h2>
+        <p className="muted" style={{ marginTop: 0 }}>
+          <code>complexos.dashboard.orders</code> · автообновление ~7с
+        </p>
+        {orders ? (
+          <div className="cos-orders-grid">
+            {(
+              [
+                ["waiting", orders.waitingOrders],
+                ["progress", orders.progressOrders],
+                ["ready", orders.readyOrders],
+                ["taked", orders.takedOrders],
+              ] as const
+            ).map(([title, list]) => {
+              const rows = asOrderRows(list);
+              return (
+                <div key={title} className="cos-orders-col">
+                  <h3>
+                    {title}{" "}
+                    <span className="muted">({rows.length})</span>
+                  </h3>
+                  {rows.length === 0 ? (
+                    <p className="muted">—</p>
+                  ) : (
+                    <ul className="cos-orders-list">
+                      {rows.slice(0, title === "taked" ? 8 : 20).map((r, i) => (
+                        <li key={r.orderId ?? `${title}-${i}`}>
+                          <strong>#{r.number ?? "?"}</strong>{" "}
+                          {r.menuItemName ?? "—"}
+                          <span className="muted">
+                            {" "}
+                            · {r.status ?? "?"} · {shortId(r.orderId)}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="muted">Нажмите Orders</p>
+        )}
+      </div>
+
+      <div className="panel panel-compact">
         <h2>Мойка · Big Wash</h2>
         <p className="muted" style={{ marginTop: 0 }}>
           Facade умеет <code>startcleaning</code>. Требует сервисный пароль.
@@ -611,6 +848,13 @@ export function ComplexOsPage() {
             onClick={() => void startBigWash()}
           >
             Start Big Wash
+          </ActionButton>
+          <ActionButton
+            helpId="cos.stopCm"
+            disabled={controlsDisabled || !unlocked}
+            onClick={() => void stopCm()}
+          >
+            Stop CM
           </ActionButton>
         </div>
       </div>

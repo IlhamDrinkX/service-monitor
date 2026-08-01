@@ -15,6 +15,7 @@
 | **5** | Встроенный NATS, сироп `dozator`, restart cm-drv | готово |
 | **6** | Сироп UI, auto NATS, flash partA/B, Android stub | готово |
 | **7** | ComplexOS, Lab terminal presets, complex status/charts | готово |
+| **8** | Lab scenarios, Cos orders/alerts bus, Brew Lab | готово |
 
 Подробнее: [`docs/STAGES.md`](docs/STAGES.md). Android: [`docs/ANDROID.md`](docs/ANDROID.md).  
 Сборка / GitHub Release: [`docs/BUILD_AND_PUBLISH.md`](docs/BUILD_AND_PUBLISH.md).  
@@ -90,14 +91,16 @@ npm test
 - **Доступ**: ключ, pubkey для ERP, snippet / запись ssh config (forwards `:8000` на модулях)
 - **Настройки**: Debug, сервисный пароль (отдельный от ERP)
 - **Сессия**: Connect SSH (общий туннель + NATS :14222), дашборд/киоск/графики
-- **Модули (Lab)**: DrinkX NATS (auto-connect), клапаны/насос/тены/flush, треки датчиков, графики комплекса, сироп Modbus, flash partA/B
+- **Модули (Lab)**: DrinkX NATS, клапаны/насос/тены/flush, сценарии (status / milkrinse / stop), Brew Lab (qty = мс), треки/графики, терминал
+- **Дозатор**: сироп Modbus/flash partA/B, legacy flash_obraz / sirup_test
 - **Терминал NATS**: пресеты subject/payload с ассоциациями, свои ★ + удаление, крупные поля, Enter / Ctrl+Enter, правила payload из ERP
-- **ComplexOS**: status / dump / pause / режимы / alerts, Big Wash, cleaning timings (runtime), grace/force restart (после сервисного пароля)
+- **ComplexOS**: status / dump / pause / режимы / alerts (live bus), orders, Big Wash / Stop CM, cleaning timings, grace/force restart
 - **Конфиг**: drinkx.json + timings мойки ComplexOS + restart cm-drv
 - Красная подсветка, если сессия не установлена или протухла
 
-## Полевые заметки (Stage 7)
+## Полевые заметки (Stage 7–8)
 
 - Опасные команды ComplexOS и запись timings требуют разблокировки в **Настройки** (сервисный пароль приложения, не ERP).
 - Payload brew: `qty` у coffee/milk — **миллисекунды насоса**, не мл; facade `hwid: "dx"`.
+- Lab-сценарии = **реальные ERP payload** (`coffeemachine.milkrinse!` и т.д.). Micro-rinse tubesLength=1000 → ~150 с насоса (tubesLength×150 мс) + reverse; смотрите `pump_R_IS` на host milk.
 - Источники subjects в ERP release: `cm-drv` expose list, `complexos/api/dashboard-api.ts`, Dashboard → Logs.

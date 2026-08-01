@@ -25,3 +25,6 @@ export * from "./nats/complex-status.js";
 export * from "./nats/chart-layout.js";
 export * from "./nats/complexos-subjects.js";
 export * from "./nats/terminal-presets.js";
+export * from "./nats/lab-scenarios.js";
+export * from "./nats/dx-ui-stat.js";
+export * from "./nats/lab-telemetry.js";

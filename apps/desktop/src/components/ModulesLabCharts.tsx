@@ -123,7 +123,21 @@ export function ModulesLabCharts({
   }
 
   function renderCard(name: string) {
-    const pts = sensorSeries(events, name, 100);
+    const { module, name: local } = parseSeriesKey(name);
+    let pts = sensorSeries(events, name, 100);
+    // Мощность: если sensor-точек мало — берём из pump-событий START/STOP.
+    if (local === "pumpPower" && pts.length < 2 && module) {
+      const fromPump = pumpPowerSeries(events, null, 100, module);
+      if (fromPump.length > pts.length) pts = fromPump;
+    }
+    // Одна точка → дублируем, чтобы sparkline не писал «мало точек».
+    if (pts.length === 1) {
+      const p = pts[0]!;
+      pts = [
+        { t: p.t - 1000, v: p.v },
+        { t: p.t, v: p.v },
+      ];
+    }
     const meta = chartSeriesMeta(name);
     return (
       <button
@@ -272,19 +286,26 @@ function ExpandedChart({
     for (const name of allSensors) {
       if (!selected.has(name)) continue;
       const meta = chartSeriesMeta(name);
+      const { module, name: local } = parseSeriesKey(name);
+      let points = sensorSeries(events, name, limit, since);
+      if (local === "pumpPower" && points.length < 2 && module) {
+        const fromPump = pumpPowerSeries(events, since, limit, module);
+        if (fromPump.length > points.length) points = fromPump;
+      }
       series.push({
         id: name,
         label: meta.label,
         code: meta.code,
         unit: meta.unit,
         color: SERIES_COLORS[ci % SERIES_COLORS.length]!,
-        points: sensorSeries(events, name, limit, since),
+        points,
       });
       ci += 1;
     }
     for (const mod of DRINKX_HOSTS) {
       if (!showPumpPower.has(mod)) continue;
       const id = seriesKey(mod, "pumpPower");
+      if (series.some((s) => s.id === id)) continue;
       const meta = chartSeriesMeta(id);
       const fromSensor = sensorSeries(events, id, limit, since);
       const fromPump =

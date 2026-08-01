@@ -1,9 +1,10 @@
 /**
  * Смысловой порядок мини-графиков Modules Lab.
  *
- * milk/coffee:
- *   [overheat1] [overheat2] [input]      [pumpCurrent]
- *   [heater1]   [heater2]   [—]          [pumpPower]
+ * milk/coffee (4 col):
+ *   [overheat1] [overheat2] [pump_R_IS]  [input]
+ *   [heater1]   [heater2]   [pump_L_IS]  [pumpPower]
+ *   [pwm1]      [pwm2]      …
  *
  * water:
  *   [input] [pressure] [pulses]
@@ -15,12 +16,16 @@ import { parseSeriesKey } from "./lab-log.js";
 const MILK_COFFEE_SLOTS: Array<string | null> = [
   "heater1_overheat",
   "heater2_overheat",
-  "input",
   "pumpCurrent",
+  "input",
   "heater1_out",
   "heater2_out",
-  null,
+  "pumpCurrentL",
   "pumpPower",
+  "heater1_pwm",
+  "heater2_pwm",
+  null,
+  null,
 ];
 
 const WATER_SLOTS: Array<string | null> = [
@@ -46,8 +51,7 @@ export function layoutModuleChartKeys(
     byLocal.set(localName(k), k);
   }
 
-  const slotsDef =
-    module === "water" ? WATER_SLOTS : MILK_COFFEE_SLOTS;
+  const slotsDef = module === "water" ? WATER_SLOTS : MILK_COFFEE_SLOTS;
   const used = new Set<string>();
   const slots: Array<string | null> = slotsDef.map((slot) => {
     if (slot == null) return null;

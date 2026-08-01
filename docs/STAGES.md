@@ -66,9 +66,19 @@
 - Core: `nats/complexos-subjects.ts`, `nats/complex-status.ts`, `nats/terminal-presets.ts`, `nats/chart-layout.ts`, `nats/valve-packages.ts`, `nats/heater-warmup.ts`
 - Help: статья «NATS subjects и payload»
 
+## Stage 8 — Lab scenarios / Cos orders+bus / Brew Lab
+
+- Modules: панель **Сценарии** (status, micro/long milkrinse, Stop CM) + **Brew Lab**; хелпы `?` + подписи ETA
+- milkrinse: реальные ERP payload; timeout = tubesLength×150 + reverse; опрос датчиков не блокируется (priority poll) → виден `pump_R_IS`
+- Core: `nats/lab-scenarios.ts` (`LAB_SCENARIOS`, `buildBrewLabPayload`, `expectedSec`)
+- NATS bus: `natsSubscribeBus` / `onNatsBus` → ComplexOS live alerts
+- ComplexOS: **Orders**, **Stop CM**, автообновление orders ~7с
+- Навигация: **Дозатор** (syrup Modbus/flash + flash_obraz) вынесена из Modules
+- Help: статья «Сценарии Lab и milkrinse»
+
 ## Дальше
 
 - Полный port `flash_obraz` (ansible) in-app
-- Расширенный brew UI / безопасные lab-сценарии поверх terminal presets
+- Расширенный brew UI (tweaks/menu items) поверх Brew Lab
 - Android native SSH/NATS runtime
 - Подпись кода (Apple notarization / Windows Authenticode) для публичных релизов

@@ -148,6 +148,95 @@ export function extractEnabledState(statusResponse: unknown): boolean | null {
   return null;
 }
 
+export type HeaterStatusSnap = {
+  enabled: boolean | null;
+  target: number | null;
+  temperature: number | null;
+  mode: string | null;
+};
+
+function unwrapStatusRecord(
+  statusResponse: unknown
+): Record<string, unknown> | null {
+  if (!statusResponse || typeof statusResponse !== "object") return null;
+  const r = statusResponse as Record<string, unknown>;
+  const result =
+    r.result && typeof r.result === "object"
+      ? (r.result as Record<string, unknown>)
+      : null;
+  return result ?? r;
+}
+
+/**
+ * Мощность насоса % из pumps.status.* ({ power: 0–100 } или PWM 0–255).
+ * ERP: power = Math.round(speed/2.55); иногда speed/pwm во вложенном result.
+ */
+export function extractPumpPowerPercent(
+  statusResponse: unknown
+): number | null {
+  if (!statusResponse || typeof statusResponse !== "object") return null;
+  const r = unwrapStatusRecord(statusResponse);
+  if (!r) return null;
+  const raw = r.power ?? r.speed ?? r.pwm ?? r.Power ?? r.Speed;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  // cm-drv отдаёт уже % (speed/2.55); если вдруг PWM — нормализуем.
+  if (n > 100 && n <= 255) return Math.round((n / 255) * 100);
+  if (n < 0) return 0;
+  return Math.round(Math.min(100, n));
+}
+
+/** heaters.status.<host>-heaterN — enabled/target/temp (без output/PWM). */
+export function extractHeaterStatus(
+  statusResponse: unknown
+): HeaterStatusSnap {
+  const r = unwrapStatusRecord(statusResponse);
+  if (!r) {
+    return {
+      enabled: null,
+      target: null,
+      temperature: null,
+      mode: null,
+    };
+  }
+  const enabled = extractEnabledState(statusResponse);
+  const targetN = Number(r.target);
+  const tempN = Number(r.temperature ?? r.lastMeasurement);
+  const mode = typeof r.mode === "string" ? r.mode : null;
+  return {
+    enabled,
+    target: Number.isFinite(targetN) ? targetN : null,
+    temperature: Number.isFinite(tempN) ? tempN : null,
+    mode,
+  };
+}
+
+/**
+ * Оценка ШИМ тэна %.
+ * ERP heaters.status / getStatus НЕ отдают PID output; DX UI graph (lastlog)
+ * после brew/heatdown часто залипает на старых out1/out2 — нельзя брать как live.
+ * При OFF → 0; при ON — как начальный output PidClassic.start в drinkx pid.js.
+ */
+export function estimateHeaterPwmPercent(
+  enabled: boolean | null | undefined,
+  target: number | null | undefined,
+  temperature: number | null | undefined
+): number | null {
+  if (enabled === false) return 0;
+  if (enabled !== true) return null;
+  if (
+    target == null ||
+    temperature == null ||
+    !Number.isFinite(target) ||
+    !Number.isFinite(temperature)
+  ) {
+    return null;
+  }
+  const err = target - temperature;
+  if (err <= 0) return 0;
+  return Math.round(Math.min(75, Math.max(25, err * 1.5)));
+}
+
 function normalizeSensorEntry(
   name: unknown,
   value: unknown,

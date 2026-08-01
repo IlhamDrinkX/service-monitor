@@ -4,6 +4,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { HelpTip } from "./components/HelpTip";
 import { AccessPage } from "./pages/AccessPage";
 import { ComplexOsPage } from "./pages/ComplexOsPage";
@@ -11,8 +12,10 @@ import { ConfigPage } from "./pages/ConfigPage";
 import { FleetPage } from "./pages/FleetPage";
 import { HelpPage } from "./pages/HelpPage";
 import { ModulesPage } from "./pages/ModulesPage";
+import { PeripheralsPage } from "./pages/PeripheralsPage";
 import { SessionPage } from "./pages/SessionPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { smLog } from "./lib/sm-log";
 import { SessionProvider } from "./state/SessionContext";
 import { useComplexSession } from "./state/useComplexSession";
 
@@ -21,6 +24,7 @@ type TabId =
   | "access"
   | "session"
   | "modules"
+  | "peripherals"
   | "complexos"
   | "config"
   | "help"
@@ -49,7 +53,14 @@ const TABS: Array<{
     label: "Модули",
     icon: "▣",
     helpId: "nav.modules",
-    title: "Тест модулей и сиропа",
+    title: "DrinkX · Industrial Control",
+  },
+  {
+    id: "peripherals",
+    label: "Дозатор",
+    icon: "⬡",
+    helpId: "nav.peripherals",
+    title: "Дозатор · Flash / flash_obraz",
   },
   {
     id: "complexos",
@@ -94,6 +105,10 @@ function AppShell() {
       // ignore
     }
   }, [collapsed]);
+
+  useEffect(() => {
+    smLog("info", "nav", `tab → ${tab}`);
+  }, [tab]);
 
   return (
     <div
@@ -156,14 +171,17 @@ function AppShell() {
           </span>
         </header>
         <main className="content">
-          {tab === "fleet" ? <FleetPage /> : null}
-          {tab === "access" ? <AccessPage /> : null}
-          {tab === "session" ? <SessionPage /> : null}
-          {tab === "modules" ? <ModulesPage /> : null}
-          {tab === "complexos" ? <ComplexOsPage /> : null}
-          {tab === "config" ? <ConfigPage /> : null}
-          {tab === "help" ? <HelpPage /> : null}
-          {tab === "settings" ? <SettingsPage /> : null}
+          <ErrorBoundary label={tab} key={tab}>
+            {tab === "fleet" ? <FleetPage /> : null}
+            {tab === "access" ? <AccessPage /> : null}
+            {tab === "session" ? <SessionPage /> : null}
+            {tab === "modules" ? <ModulesPage /> : null}
+            {tab === "peripherals" ? <PeripheralsPage /> : null}
+            {tab === "complexos" ? <ComplexOsPage /> : null}
+            {tab === "config" ? <ConfigPage /> : null}
+            {tab === "help" ? <HelpPage /> : null}
+            {tab === "settings" ? <SettingsPage /> : null}
+          </ErrorBoundary>
         </main>
       </div>
     </div>

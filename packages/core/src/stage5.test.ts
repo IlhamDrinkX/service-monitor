@@ -9,6 +9,9 @@ import {
   extractWaterPressure,
   extractWaterTotalPulses,
   extractPumpCurrent,
+  extractPumpPowerPercent,
+  extractHeaterStatus,
+  estimateHeaterPwmPercent,
   pumpPowerToPwm,
   valveCommandSubject,
   defaultHwid,
@@ -67,6 +70,32 @@ describe("stage5 / module-devices", () => {
       }),
       1.85
     );
+  });
+
+  it("extracts pump power percent from pumps.status", () => {
+    assert.equal(extractPumpPowerPercent({ power: 80, enabled: true }), 80);
+    assert.equal(
+      extractPumpPowerPercent({ result: { power: 255, enabled: true } }),
+      100
+    );
+    assert.equal(extractPumpPowerPercent({}), null);
+  });
+
+  it("extracts heater status and estimates PWM (not from stale DX graph)", () => {
+    const snap = extractHeaterStatus({
+      success: true,
+      enabled: true,
+      target: 60,
+      temperature: 40,
+      mode: "manual",
+    });
+    assert.equal(snap.enabled, true);
+    assert.equal(snap.target, 60);
+    assert.equal(snap.temperature, 40);
+    assert.equal(estimateHeaterPwmPercent(true, 60, 40), 30);
+    assert.equal(estimateHeaterPwmPercent(false, 60, 40), 0);
+    assert.equal(estimateHeaterPwmPercent(true, 50, 55), 0);
+    assert.equal(estimateHeaterPwmPercent(true, 80, 20), 75);
   });
 
   it("extracts pump current via deep search", () => {

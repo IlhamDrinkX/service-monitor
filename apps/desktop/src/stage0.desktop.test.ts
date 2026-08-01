@@ -16,10 +16,14 @@ describe("desktop / stage0 content wiring", () => {
       "nav.access",
       "nav.session",
       "nav.modules",
+      "nav.peripherals",
       "nav.complexos",
       "nav.config",
       "nav.help",
       "nav.settings",
+      "lab.scenarios",
+      "lab.scenario.milkrinseMicro",
+      "lab.scenario.milkrinseLong",
       "access.generateKey",
       "access.copySnippet",
       "access.applyConfig",
@@ -37,6 +41,7 @@ describe("desktop / stage0 content wiring", () => {
     assert.ok(HELP_ARTICLES.some((a) => a.id === "how-complex-works"));
     assert.ok(HELP_ARTICLES.some((a) => a.id === "debug-mode"));
     assert.ok(HELP_ARTICLES.some((a) => a.id === "nats-payloads"));
+    assert.ok(HELP_ARTICLES.some((a) => a.id === "lab-scenarios"));
   });
 
   it("session shortcuts point at tunnel ports", () => {

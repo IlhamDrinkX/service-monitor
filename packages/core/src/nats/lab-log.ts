@@ -235,7 +235,16 @@ function localSeriesMeta(localName: string): ChartSeriesMeta {
     return { label: "Мощность насоса", code: "pump.power", unit: "%" };
   }
   if (localName === "pumpCurrent") {
-    return { label: "Ток насоса", code: "pump_R_IS", unit: "A" };
+    return { label: "Насос R_IS", code: "pump_R_IS", unit: "V" };
+  }
+  if (localName === "pumpCurrentL") {
+    return { label: "Насос L_IS", code: "pump_L_IS", unit: "V" };
+  }
+  if (localName === "heater1_pwm") {
+    return { label: "Тэн 1 ШИМ", code: "heater1.pwm", unit: "%" };
+  }
+  if (localName === "heater2_pwm") {
+    return { label: "Тэн 2 ШИМ", code: "heater2.pwm", unit: "%" };
   }
   return { label: localName, code: localName, unit: "" };
 }
@@ -365,7 +374,10 @@ export function complexSensorCatalog(): string[] {
       seriesKey(mod, "pumpCurrent"),
       seriesKey(mod, "heater1_out"),
       seriesKey(mod, "heater2_out"),
-      seriesKey(mod, "pumpPower")
+      seriesKey(mod, "pumpPower"),
+      seriesKey(mod, "pumpCurrentL"),
+      seriesKey(mod, "heater1_pwm"),
+      seriesKey(mod, "heater2_pwm")
     );
   }
   keys.push(

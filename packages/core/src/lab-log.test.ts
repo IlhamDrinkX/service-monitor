@@ -124,7 +124,7 @@ describe("lab-log", () => {
     });
     assert.equal(chartSeriesMeta("milk.waterPressure").unit, "bar");
     assert.match(chartSeriesMeta("coffee.pumpCurrent").label, /coffee/);
-    assert.equal(chartSeriesMeta("pumpCurrent").unit, "A");
+    assert.equal(chartSeriesMeta("pumpCurrent").unit, "V");
     assert.equal(chartSinceMs("all"), null);
     assert.ok(complexSensorCatalog().includes("milk.pumpCurrent"));
 

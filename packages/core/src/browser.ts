@@ -64,6 +64,9 @@ export {
   heaterStopSubject,
   heaterStatusSubject,
   extractEnabledState,
+  extractPumpPowerPercent,
+  extractHeaterStatus,
+  estimateHeaterPwmPercent,
   extractTempMap,
   extractWaterTotalPulses,
   extractWaterPressure,
@@ -76,7 +79,7 @@ export {
   FLOW_CALIBRATION_PULSES_POLL_MS,
   milkSystemValveNumbers,
 } from "./nats/module-devices.js";
-export type { DrinkxHost, TempSensorKey, PumpDirection } from "./nats/module-devices.js";
+export type { DrinkxHost, TempSensorKey, PumpDirection, HeaterStatusSnap } from "./nats/module-devices.js";
 export {
   createLabEvent,
   formatLabTerminalLine,
@@ -144,3 +147,42 @@ export type {
   TerminalSubjectPreset,
   TerminalPayloadPreset,
 } from "./nats/terminal-presets.js";
+export {
+  LAB_SCENARIOS,
+  BREW_LAB_DEFAULTS,
+  buildBrewLabPayload,
+  scenariosForHost,
+} from "./nats/lab-scenarios.js";
+export type {
+  LabScenario,
+  LabScenarioRisk,
+  LabScenarioContext,
+  BrewLabFormInput,
+  BrewLabPartInput,
+  BrewLabPartType,
+} from "./nats/lab-scenarios.js";
+export {
+  parseDxUiStatHtml,
+  extractPumpRisFromDxStat,
+  extractPumpRisFromDxHtml,
+  parseDxUiSnapshot,
+  parseDxUiGraphLastRow,
+  dxUiSnapshotHasData,
+  extractJsonArrayAfter,
+} from "./nats/dx-ui-stat.js";
+export type { DxUiSnapshot } from "./nats/dx-ui-stat.js";
+export {
+  timed,
+  isStale,
+  emptyLabSnapshot,
+  setTimed,
+  STALE_MS,
+  isTelemetryStale,
+} from "./nats/lab-telemetry.js";
+export type {
+  TimedValue,
+  TelemetrySource,
+  LabSnapshot,
+  LabHostHeaters,
+  LabHostPwm,
+} from "./nats/lab-telemetry.js";

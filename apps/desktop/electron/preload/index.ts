@@ -173,11 +173,22 @@ export type DesktopApi = {
   natsSubscribeStatus: () => Promise<
     { ok: true } | { ok: false; error: string }
   >;
+  natsSubscribeBus: (
+    subjects: string[]
+  ) => Promise<
+    { ok: true; subjects: string[] } | { ok: false; error: string }
+  >;
+  natsUnsubscribeBus: () => Promise<
+    { ok: true } | { ok: false; error: string }
+  >;
   natsUpdateConfig: (
     patch: Record<string, unknown>
   ) => Promise<{ ok: true; data: unknown } | { ok: false; error: string }>;
   onNatsState: (cb: (info: NatsConnectionInfo) => void) => () => void;
   onNatsStatus: (cb: (payload: unknown) => void) => () => void;
+  onNatsBus: (
+    cb: (msg: { subject: string; data: unknown }) => void
+  ) => () => void;
   syrupCheckSsh: () => Promise<
     { ok: true; message: string } | { ok: false; error: string }
   >;
@@ -205,6 +216,47 @@ export type DesktopApi = {
   onFlashLog: (
     cb: (entry: { level: "log" | "error"; message: string }) => void
   ) => () => void;
+  /** DX UI :8000 — pump_R/L_IS (В) + PWM тэнов из pid graph. */
+  dxUiPumpCurrents: (input?: {
+    mode?: "remote" | "local" | null;
+    timeoutMs?: number;
+  }) => Promise<
+    | {
+        ok: true;
+        milk: {
+          pump_R_IS: number | null;
+          pump_L_IS: number | null;
+          heater1_pwm: number | null;
+          heater2_pwm: number | null;
+          error?: string;
+          via?: "http" | "ssh";
+        };
+        coffee: {
+          pump_R_IS: number | null;
+          pump_L_IS: number | null;
+          heater1_pwm: number | null;
+          heater2_pwm: number | null;
+          error?: string;
+          via?: "http" | "ssh";
+        };
+      }
+    | {
+        ok: false;
+        error: string;
+        milk: {
+          pump_R_IS: number | null;
+          pump_L_IS: number | null;
+          heater1_pwm: number | null;
+          heater2_pwm: number | null;
+        };
+        coffee: {
+          pump_R_IS: number | null;
+          pump_L_IS: number | null;
+          heater1_pwm: number | null;
+          heater2_pwm: number | null;
+        };
+      }
+  >;
 };
 
 const api: DesktopApi = {
@@ -263,6 +315,9 @@ const api: DesktopApi = {
   natsRequestMany: (input) => ipcRenderer.invoke("nats:requestMany", input),
   natsPublish: (input) => ipcRenderer.invoke("nats:publish", input),
   natsSubscribeStatus: () => ipcRenderer.invoke("nats:subscribeStatus"),
+  natsSubscribeBus: (subjects) =>
+    ipcRenderer.invoke("nats:subscribeBus", subjects),
+  natsUnsubscribeBus: () => ipcRenderer.invoke("nats:unsubscribeBus"),
   natsUpdateConfig: (patch) => ipcRenderer.invoke("nats:updateConfig", patch),
   onNatsState: (cb) => {
     const handler = (_e: IpcRendererEvent, info: NatsConnectionInfo) =>
@@ -274,6 +329,14 @@ const api: DesktopApi = {
     const handler = (_e: IpcRendererEvent, payload: unknown) => cb(payload);
     ipcRenderer.on("nats:status", handler);
     return () => ipcRenderer.removeListener("nats:status", handler);
+  },
+  onNatsBus: (cb) => {
+    const handler = (
+      _e: IpcRendererEvent,
+      msg: { subject: string; data: unknown }
+    ) => cb(msg);
+    ipcRenderer.on("nats:bus", handler);
+    return () => ipcRenderer.removeListener("nats:bus", handler);
   },
   syrupCheckSsh: () => ipcRenderer.invoke("syrup:checkSsh"),
   syrupModbusScan: (input) => ipcRenderer.invoke("syrup:modbusScan", input),
@@ -287,6 +350,7 @@ const api: DesktopApi = {
     ipcRenderer.on("flash:log", handler);
     return () => ipcRenderer.removeListener("flash:log", handler);
   },
+  dxUiPumpCurrents: (input) => ipcRenderer.invoke("dxUi:pumpCurrents", input),
 };
 
 contextBridge.exposeInMainWorld("desktop", api);

@@ -1096,6 +1096,15 @@ textarea.code-editor {
   order: 99;
 }
 
+.sensor-stale {
+  border-color: #c9a227 !important;
+  background: rgba(201, 162, 39, 0.12);
+}
+
+.sensor-stale .metric {
+  color: #e8c547;
+}
+
 .lab-sensor-module-toggles {
   display: flex;
   flex-wrap: wrap;
@@ -1195,6 +1204,36 @@ textarea.code-editor {
   border: 1px solid var(--stroke);
   color: var(--text);
   box-sizing: border-box;
+}
+
+.cos-orders-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.cos-orders-col h3 {
+  margin: 0 0 6px;
+  font-size: 0.9rem;
+}
+
+.cos-orders-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow: auto;
+  font-size: 0.85rem;
+}
+
+.cos-orders-list li {
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--bg-soft);
+  border: 1px solid var(--stroke);
 }
 
 .sensor-row {

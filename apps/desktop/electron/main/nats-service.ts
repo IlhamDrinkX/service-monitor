@@ -17,6 +17,7 @@ const DEFAULT_TIMEOUT = 5_000;
 
 let nc: NatsConnection | null = null;
 let statusSub: Subscription | null = null;
+let busSubs: Subscription[] = [];
 let currentServer: string | null = null;
 
 function decode(data: Uint8Array): unknown {
@@ -59,6 +60,7 @@ export async function natsDisconnect(): Promise<NatsConnectionInfo> {
     // ignore
   }
   statusSub = null;
+  clearBusSubs();
   if (nc) {
     try {
       await nc.drain();
@@ -359,6 +361,54 @@ export async function natsSubscribeStatus(): Promise<{ ok: true }> {
       broadcast("nats:status", decode(msg.data));
     },
   });
+  return { ok: true };
+}
+
+function clearBusSubs() {
+  for (const sub of busSubs) {
+    try {
+      sub.unsubscribe();
+    } catch {
+      // ignore
+    }
+  }
+  busSubs = [];
+}
+
+/**
+ * Подписка на произвольные subjects (ComplexOS bus alerts и т.п.).
+ * Сообщения → renderer channel `nats:bus` { subject, data }.
+ */
+export async function natsSubscribeBus(
+  subjects: string[]
+): Promise<{ ok: true; subjects: string[] }> {
+  const conn = await ensure();
+  clearBusSubs();
+  const unique = [...new Set(subjects.map((s) => s.trim()).filter(Boolean))];
+  console.log("[nats] subscribeBus", unique);
+  for (const subject of unique) {
+    const sub = conn.subscribe(subject, {
+      callback: (err, msg) => {
+        if (err) {
+          console.warn("[nats] bus sub", subject, err);
+          return;
+        }
+        const data = decode(msg.data);
+        console.log("[nats] bus", msg.subject || subject);
+        broadcast("nats:bus", {
+          subject: msg.subject || subject,
+          data,
+        });
+      },
+    });
+    busSubs.push(sub);
+  }
+  return { ok: true, subjects: unique };
+}
+
+export async function natsUnsubscribeBus(): Promise<{ ok: true }> {
+  console.log("[nats] unsubscribeBus", busSubs.length);
+  clearBusSubs();
   return { ok: true };
 }
 

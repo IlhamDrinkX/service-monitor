@@ -30,19 +30,20 @@ import {
   extractTempMap,
   extractWaterPressure,
   extractWaterTotalPulses,
+  estimateHeaterPwmPercent,
   formatLabTerminalLine,
   getValvePackage,
   heaterCommandSubject,
-  heaterStatusSubject,
   heaterStopSubject,
+  isTelemetryStale,
   labEventsToCsv,
   milkSystemValveNumbers,
   parseComplexStatusTuple,
   pumpCommandPayload,
   pumpCommandSubject,
-  pumpStatusSubject,
   pumpStopSubject,
   seriesKey,
+  STALE_MS,
   valveCommandSubject,
   valveStatusSubject,
   warmupOverheatKey,
@@ -52,8 +53,13 @@ import {
   TERMINAL_SUBJECT_PRESETS,
   associatedPayloadIds,
   findSubjectPresetFor,
+  BREW_LAB_DEFAULTS,
+  buildBrewLabPayload,
+  scenariosForHost,
+  type BrewLabPartType,
   type DrinkxHost,
   type LabEvent,
+  type LabScenario,
   type NatsConnectionInfo,
   type NatsMusterEntry,
   type TempSensorKey,
@@ -62,8 +68,9 @@ import {
 import { ActionButton } from "../components/ActionButton";
 import { HelpTip } from "../components/HelpTip";
 import { ModulesLabCharts } from "../components/ModulesLabCharts";
-import { SyrupFlashPanel } from "../components/SyrupFlashPanel";
+import { useLabTelemetry } from "../lab/useLabTelemetry";
 import { onEnterNavigate } from "../lib/form-nav";
+import { smLog } from "../lib/sm-log";
 import { useComplexSession } from "../state/useComplexSession";
 
 type EnabledMap = Record<string, boolean | null>;
@@ -270,6 +277,13 @@ export function ModulesPage() {
   const [pumpCurrentByHost, setPumpCurrentByHost] = useState<
     Partial<Record<"milk" | "coffee", number | null>>
   >({});
+  const [pumpCurrentLByHost, setPumpCurrentLByHost] = useState<
+    Partial<Record<"milk" | "coffee", number | null>>
+  >({});
+  const [heaterPwmByHost, setHeaterPwmByHost] = useState<
+    Partial<Record<"milk" | "coffee" | "water", Partial<Record<string, number>>>>
+  >({});
+  const [dxUiStatus, setDxUiStatus] = useState<string>("");
   const [pumpPowerByHost, setPumpPowerByHost] = useState<
     Partial<Record<DrinkxHost, number | null>>
   >({});
@@ -294,7 +308,13 @@ export function ModulesPage() {
   const [warmupStatus, setWarmupStatus] = useState("");
   const [foamTemp, setFoamTemp] = useState(65);
   const [foamAir, setFoamAir] = useState(35);
-  const [showLegacy, setShowLegacy] = useState(false);
+  const [brewHwid, setBrewHwid] = useState<string>("dx");
+  const [brewType, setBrewType] = useState<BrewLabPartType>("coffee");
+  const [brewQtyMs, setBrewQtyMs] = useState(BREW_LAB_DEFAULTS.qtyMs);
+  const [brewTempC, setBrewTempC] = useState(BREW_LAB_DEFAULTS.tempC);
+  const [brewAddMilk, setBrewAddMilk] = useState(false);
+  const [brewMilkQtyMs, setBrewMilkQtyMs] = useState(8000);
+  const [brewMilkTempC, setBrewMilkTempC] = useState(65);
   const [calibRows, setCalibRows] = useState<CalibRow[]>(
     FLOW_CALIBRATION_QTYS.map((qty) => ({ qty }))
   );
@@ -328,10 +348,14 @@ export function ModulesPage() {
   const warmupBtnRef = useRef<HTMLButtonElement | null>(null);
   const pollPaused = useRef(false);
   const pollGeneration = useRef(0);
+  const scenarioBusyToken = useRef<object | null>(null);
   const autoNatsTried = useRef(false);
   const heaterTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(
     new Map()
   );
+  /** Инкремент отменяет in-flight startPump (STOP во время тэнов). */
+  const pumpSessionRef = useRef(0);
+  const pumpTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const commandLock = useRef(Promise.resolve());
   const lastSensorLog = useRef<Record<string, number>>({});
   const valvePkgAbort = useRef<AbortController | null>(null);
@@ -396,20 +420,46 @@ export function ModulesPage() {
       mod: DrinkxHost,
       name: string,
       value: number,
-      minDelta = 0.15
+      minDelta = 0.15,
+      opts?: { force?: boolean; heartbeatMs?: number; digits?: number }
     ) => {
-      if (!isSensorTracked(mod, name)) return;
+      // pumpCurrent* / pumpPower / heater*_pwm / water pressure+pulses всегда пишем.
+      const critical =
+        name === "pumpCurrent" ||
+        name === "pumpCurrentL" ||
+        name === "pumpPower" ||
+        name === "heater1_pwm" ||
+        name === "heater2_pwm" ||
+        name === "waterPressure" ||
+        name === "waterTotalPulses";
+      if (!opts?.force && !critical && !isSensorTracked(mod, name)) return;
       const key = seriesKey(mod, name);
       const prev = lastSensorLog.current[key];
       const now = Date.now();
+      const heartbeat =
+        opts?.heartbeatMs ??
+        (critical
+          ? name === "waterTotalPulses" || name === "waterPressure"
+            ? 1_500
+            : 1_200
+          : 5_000);
+      const delta =
+        name === "pumpCurrent" || name === "pumpCurrentL"
+          ? Math.min(minDelta, 0.005)
+          : name === "waterTotalPulses"
+            ? Math.min(minDelta, 1)
+            : minDelta;
       const changed =
         prev == null ||
-        Math.abs(prev - value) >= minDelta ||
-        now - (lastSensorLog.current[`${key}__t`] ?? 0) > 5000;
+        Math.abs(prev - value) >= delta ||
+        now - (lastSensorLog.current[`${key}__t`] ?? 0) > heartbeat;
       if (!changed) return;
       lastSensorLog.current[key] = value;
       lastSensorLog.current[`${key}__t`] = now;
-      pushLab("sensor", name, Number(value.toFixed(2)), undefined, mod);
+      const digits =
+        opts?.digits ??
+        (name === "pumpCurrent" || name === "pumpCurrentL" ? 3 : 2);
+      pushLab("sensor", name, Number(value.toFixed(digits)), undefined, mod);
     },
     [isSensorTracked, pushLab]
   );
@@ -446,6 +496,141 @@ export function ModulesPage() {
     typeof sessionStorage !== "undefined" &&
     sessionStorage.getItem("sm.writeUnlocked") === "1";
 
+  const { snap: labSnap, controllerRef: labTelemetryRef } = useLabTelemetry({
+    live,
+    getActiveHost: () => hostRef.current,
+    resolveHwid: (h) => resolveHwid(h, modulesRef.current),
+    getSessionMode: () => session.mode,
+    valveHoldUntil: valveHoldUntil.current,
+  });
+
+  /** Применить снимок телеметрии → UI + графики. */
+  useEffect(() => {
+    if (!live || labSnap.lastTickAt === 0) return;
+    const active = hostRef.current;
+
+    setComplexTemps(labSnap.complexTemps);
+    if (labSnap.complexTemps[active]) {
+      setTemps(labSnap.complexTemps[active] ?? {});
+    }
+    if (labSnap.waterPressure) setWaterPressure(labSnap.waterPressure.value);
+    if (labSnap.waterPulses) setWaterPulses(labSnap.waterPulses.value);
+    if (labSnap.waterPressure) {
+      pushSensorSample(
+        "water",
+        "waterPressure",
+        labSnap.waterPressure.value,
+        0.02
+      );
+    }
+    if (labSnap.waterPulses) {
+      pushSensorSample(
+        "water",
+        "waterTotalPulses",
+        labSnap.waterPulses.value,
+        1
+      );
+    }
+
+    for (const mod of DRINKX_HOSTS) {
+      const temps = labSnap.complexTemps[mod];
+      if (!temps) continue;
+      for (const [key, val] of Object.entries(temps)) {
+        if (typeof val === "number") pushSensorSample(mod, key, val);
+      }
+    }
+
+    const pumpTv = labSnap.pumpOn[active];
+    if (pumpTv) setPumpOn(pumpTv.value);
+
+    setPumpPowerByHost((prev) => {
+      const next = { ...prev };
+      for (const mod of DRINKX_HOSTS) {
+        const p = labSnap.pumpPower[mod];
+        if (p) next[mod] = p.value;
+      }
+      return next;
+    });
+    for (const mod of DRINKX_HOSTS) {
+      const p = labSnap.pumpPower[mod];
+      if (p) pushSensorSample(mod, "pumpPower", p.value, 0.5);
+    }
+
+    setHeaters((prev) => {
+      const next = { ...prev };
+      const hh = labSnap.heaters[active];
+      if (hh?.heater1) next.heater1 = hh.heater1.value;
+      if (hh?.heater2) next.heater2 = hh.heater2.value;
+      return next;
+    });
+
+    setHeaterPwmByHost((prev) => {
+      const next = { ...prev };
+      for (const mod of DRINKX_HOSTS) {
+        const pwm = labSnap.heaterPwm[mod];
+        if (!pwm) continue;
+        next[mod] = {
+          ...next[mod],
+          ...(pwm.heater1 ? { heater1: pwm.heater1.value } : {}),
+          ...(pwm.heater2 ? { heater2: pwm.heater2.value } : {}),
+        };
+      }
+      return next;
+    });
+    for (const mod of DRINKX_HOSTS) {
+      const pwm = labSnap.heaterPwm[mod];
+      if (!pwm) continue;
+      if (pwm.heater1) pushSensorSample(mod, "heater1_pwm", pwm.heater1.value, 0.5);
+      if (pwm.heater2) pushSensorSample(mod, "heater2_pwm", pwm.heater2.value, 0.5);
+    }
+
+    setPumpCurrentByHost((prev) => {
+      const next = { ...prev };
+      for (const mod of ["milk", "coffee"] as const) {
+        const v = labSnap.pumpRis[mod];
+        if (v) next[mod] = v.value;
+      }
+      return next;
+    });
+    setPumpCurrentLByHost((prev) => {
+      const next = { ...prev };
+      for (const mod of ["milk", "coffee"] as const) {
+        const v = labSnap.pumpLis[mod];
+        if (v) next[mod] = v.value;
+      }
+      return next;
+    });
+    for (const mod of ["milk", "coffee"] as const) {
+      const r = labSnap.pumpRis[mod];
+      const l = labSnap.pumpLis[mod];
+      if (r) pushSensorSample(mod, "pumpCurrent", r.value, 0.01);
+      if (l) pushSensorSample(mod, "pumpCurrentL", l.value, 0.01);
+    }
+
+    if (labSnap.dxUiStatus) setDxUiStatus(labSnap.dxUiStatus);
+
+    setValves((prev) => {
+      const next = { ...prev };
+      const now = Date.now();
+      const allowed = new Set(MODULE_VALVES[hostRef.current]);
+      for (const [baseId, tv] of Object.entries(labSnap.valves)) {
+        if (!allowed.has(baseId)) continue;
+        const hold = valveHoldUntil.current.get(baseId) ?? 0;
+        if (hold > now) continue;
+        if (tv) next[baseId] = tv.value;
+      }
+      return next;
+    });
+  }, [live, labSnap, pushSensorSample]);
+
+  const refreshDevices = useCallback(() => {
+    labTelemetryRef.current?.kick();
+  }, [labTelemetryRef]);
+
+  const pollDxPumpCurrents = useCallback(() => {
+    labTelemetryRef.current?.kickDx();
+  }, [labTelemetryRef]);
+
   useEffect(() => {
     void window.desktop.natsInfo().then(setNats).catch(() => undefined);
     return window.desktop.onNatsState(setNats);
@@ -463,7 +648,8 @@ export function ModulesPage() {
     setCalibLog("");
     setCalibStatus("");
     valveHoldUntil.current.clear();
-  }, [host]);
+    labTelemetryRef.current?.onHostChange();
+  }, [host, labTelemetryRef]);
 
   const withHwid = useCallback(
     (payload: Record<string, unknown> = {}) => ({
@@ -604,156 +790,6 @@ export function ModulesPage() {
     [pushSensorSample]
   );
 
-  const lastTupleLog = useRef(0);
-  const pollInFlight = useRef(false);
-
-  const refreshDevices = useCallback(async () => {
-    if (!live || pollPaused.current || pollInFlight.current) return;
-    const gen = pollGeneration.current;
-    const active = hostRef.current;
-    pollInFlight.current = true;
-    try {
-      const valveIds = MODULE_VALVES[active];
-      const activeHwid = resolveHwid(active, modulesRef.current);
-
-      // Кортеж: 1× status many (датчики всего комплекса)
-      // + параллельно valves/pump/heater status активного модуля.
-      // Лампы и графики зажигаем только из ответов бека.
-      const [tupleRes, valveResults, pumpRes, heaterResults] =
-        await Promise.all([
-          window.desktop
-            .natsRequestMany({
-              subject: NATS_SUBJECTS.status,
-              payload: {},
-              timeoutMs: 900,
-              priority: "poll",
-            })
-            .catch((e) => ({
-              ok: false as const,
-              error: errText(e),
-              replies: [] as unknown[],
-            })),
-          Promise.all(
-            valveIds.map(async (baseId) => {
-              const res = await window.desktop.natsRequest({
-                subject: valveStatusSubject(active, baseId),
-                payload: { hwid: activeHwid },
-                timeoutMs: 700,
-                priority: "poll",
-              });
-              return [
-                baseId,
-                res.ok ? extractEnabledState(res.data) : null,
-              ] as const;
-            })
-          ),
-          window.desktop.natsRequest({
-            subject: pumpStatusSubject(active),
-            payload: { hwid: activeHwid },
-            timeoutMs: 700,
-            priority: "poll",
-          }),
-          Promise.all(
-            HEATER_IDS.map(async (hid) => {
-              const res = await window.desktop.natsRequest({
-                subject: heaterStatusSubject(active, hid),
-                payload: { hwid: activeHwid },
-                timeoutMs: 700,
-                priority: "poll",
-              });
-              return [
-                hid,
-                res.ok ? extractEnabledState(res.data) : null,
-              ] as const;
-            })
-          ),
-        ]);
-
-      if (pollPaused.current || gen !== pollGeneration.current) return;
-      if (hostRef.current !== active) return;
-
-      const replies =
-        tupleRes.ok && Array.isArray(tupleRes.replies)
-          ? tupleRes.replies
-          : [];
-      if (replies.length > 0) {
-        const tuple = applyComplexTuple(replies);
-        const nowLog = Date.now();
-        if (nowLog - lastTupleLog.current > 3_000) {
-          lastTupleLog.current = nowLog;
-          pushLab(
-            "system",
-            "complex-status",
-            tuple.replies,
-            complexTupleSummary(tuple)
-          );
-        }
-      } else {
-        // Fallback: status без hwid (ответит любой онлайн-модуль / facade)
-        const statusRes = await window.desktop.natsRequest({
-          subject: NATS_SUBJECTS.status,
-          payload: {},
-          timeoutMs: 1_200,
-          priority: "poll",
-        });
-        if (statusRes.ok) {
-          const attributed = parseComplexStatusTuple([statusRes.data]);
-          applyComplexTuple([statusRes.data]);
-          if (attributed.hosts[active].sensorCount === 0) {
-            ingestStatusSensors(active, statusRes.data, true);
-          }
-        }
-      }
-
-      const now = Date.now();
-      const valveOk = valveResults.filter(([, v]) => v !== null).length;
-      setValves((prev) => {
-        const next = { ...prev };
-        for (const [baseId, val] of valveResults) {
-          const hold = valveHoldUntil.current.get(baseId) ?? 0;
-          if (hold > now) continue;
-          if (val !== null) next[baseId] = val;
-        }
-        return next;
-      });
-      if (pumpRes.ok) {
-        const p = extractEnabledState(pumpRes.data);
-        if (p !== null) setPumpOn(p);
-      }
-      setHeaters((prev) => {
-        const next = { ...prev };
-        for (const [hid, val] of heaterResults) {
-          if (val !== null) next[hid] = val;
-        }
-        return next;
-      });
-
-      if (Date.now() - lastTupleLog.current > 3_000) {
-        // уже залогировали tuple выше; иначе — краткий valve summary
-        if (replies.length === 0) {
-          lastTupleLog.current = Date.now();
-          pushLab(
-            "system",
-            "actuators",
-            valveOk,
-            `valves ${valveOk}/${valveIds.length} · hwid ${activeHwid}`
-          );
-        }
-      }
-    } catch (e) {
-      console.warn("[modules] refresh", e);
-    } finally {
-      pollInFlight.current = false;
-    }
-  }, [live, applyComplexTuple, ingestStatusSensors, pushLab]);
-
-  useEffect(() => {
-    if (!live) return;
-    void refreshDevices();
-    const id = setInterval(() => void refreshDevices(), 1_100);
-    return () => clearInterval(id);
-  }, [live, host, hwid, refreshDevices]);
-
   async function withCommandLock<T>(fn: () => Promise<T>): Promise<T> {
     const prev = commandLock.current;
     let release!: () => void;
@@ -763,15 +799,16 @@ export function ModulesPage() {
     await prev.catch(() => undefined);
     pollPaused.current = true;
     pollGeneration.current += 1;
+    labTelemetryRef.current?.pause();
     try {
       return await fn();
     } finally {
       await sleep(80);
       pollPaused.current = false;
+      labTelemetryRef.current?.resume();
       release();
-      // Отложенный опрос — иначе сразу затираем свежую команду устаревшим status.
       window.setTimeout(() => {
-        if (!pollPaused.current) void refreshDevices();
+        if (!pollPaused.current) labTelemetryRef.current?.kick();
       }, 500);
     }
   }
@@ -1012,16 +1049,18 @@ export function ModulesPage() {
   async function toggleValve(baseId: string) {
     const next = !(valves[baseId] === true);
     setBusy(`valve-${baseId}`);
-    // Оптимистично мигнём, затем зажжём строго по ответу бека.
+    // Оптимистично + hold 4с — poll не должен гасить лампу до verify.
     setValves((v) => ({ ...v, [baseId]: next }));
-    valveHoldUntil.current.set(baseId, Date.now() + 3_000);
+    valveHoldUntil.current.set(baseId, Date.now() + 4_000);
+    labTelemetryRef.current?.setValve(baseId, next);
     pushLab("valve", baseId, next, next ? "cmd open" : "cmd close");
     try {
       await withCommandLock(async () => {
         const res = await ensureValve(baseId, next);
         if (res.enabled !== undefined) {
           setValves((v) => ({ ...v, [baseId]: res.enabled! }));
-          valveHoldUntil.current.set(baseId, Date.now() + 3_000);
+          labTelemetryRef.current?.setValve(baseId, res.enabled!);
+          valveHoldUntil.current.set(baseId, Date.now() + 4_000);
         }
         if (!res.ok) {
           pushLab("valve", baseId, res.enabled ?? null, res.error || "verify failed");
@@ -1039,7 +1078,8 @@ export function ModulesPage() {
             const got = st.ok ? extractEnabledState(st.data) : null;
             if (got !== null) {
               setValves((v) => ({ ...v, [baseId]: got }));
-              valveHoldUntil.current.set(baseId, Date.now() + 1_500);
+              labTelemetryRef.current?.setValve(baseId, got);
+              valveHoldUntil.current.set(baseId, Date.now() + 2_000);
             } else {
               valveHoldUntil.current.delete(baseId);
             }
@@ -1060,7 +1100,11 @@ export function ModulesPage() {
     setBusy("valves-all");
     setValves((prev) => {
       const next = { ...prev };
-      for (const id of MODULE_VALVES[host]) next[id] = enabled;
+      for (const id of MODULE_VALVES[host]) {
+        next[id] = enabled;
+        valveHoldUntil.current.set(id, Date.now() + 4_000);
+        labTelemetryRef.current?.setValve(id, enabled);
+      }
       return next;
     });
     try {
@@ -1140,95 +1184,169 @@ export function ModulesPage() {
     }
   }
 
-  async function startHeatersForPump() {
+  function burstDxPumpCurrents() {
+    void pollDxPumpCurrents();
+    window.setTimeout(() => void pollDxPumpCurrents(), 350);
+    window.setTimeout(() => void pollDxPumpCurrents(), 900);
+    window.setTimeout(() => void pollDxPumpCurrents(), 1_800);
+  }
+
+  function estimatePwmForHeater(hid: string): number {
+    const sensor =
+      hid === "heater1" ? "heater1_out" : hid === "heater2" ? "heater2_out" : null;
+    const temp =
+      (sensor && temps[sensor]) ??
+      (sensor && complexTemps[host]?.[sensor as TempSensorKey]) ??
+      null;
+    return estimateHeaterPwmPercent(true, heaterTarget, temp) ?? 25;
+  }
+
+  async function startHeatersForPump(session: number) {
     const autoMs = Math.max(1, heaterAutoStopSec) * 1000;
+    const failed: string[] = [];
     for (const hid of HEATER_IDS) {
+      if (session !== pumpSessionRef.current) return;
       try {
         const prev = heaterTimers.current.get(hid);
         if (prev) clearTimeout(prev);
-        const res = await req(heaterCommandSubject(host, hid), {
-          target: heaterTarget,
-        });
+        const res = await withCommandLock(() =>
+          req(heaterCommandSubject(host, hid), { target: heaterTarget })
+        );
+        if (session !== pumpSessionRef.current) return;
         if (res.ok) {
+          const short =
+            hid === "heater1" ? ("heater1" as const) : ("heater2" as const);
+          const pwmEst = estimatePwmForHeater(hid);
           setHeaters((h) => ({ ...h, [hid]: true }));
+          labTelemetryRef.current?.setHeater(host, short, true, pwmEst);
+          setHeaterPwmByHost((p) => ({
+            ...p,
+            [host]: { ...p[host], [short]: pwmEst },
+          }));
+          pushSensorSample(host, `${short}_pwm`, pwmEst, 0.5);
+          pushLab("heater", hid, true, `with pump target=${heaterTarget}C pwm~${pwmEst}`);
           const timer = setTimeout(() => {
             void stopHeater(hid);
           }, autoMs);
           heaterTimers.current.set(hid, timer);
+        } else {
+          failed.push(`${hid}: ${res.error}`);
         }
       } catch (e) {
+        failed.push(`${hid}: ${errText(e)}`);
         console.warn("[modules] heater with pump", hid, e);
       }
+    }
+    if (failed.length && session === pumpSessionRef.current) {
+      setToast({
+        text: `Тэны с насосом: ${failed.join("; ")}`,
+        error: true,
+      });
     }
   }
 
   async function startPump(direction: "forward" | "reverse" = "forward") {
-    pollPaused.current = true;
+    const session = ++pumpSessionRef.current;
     setBusy("pump");
+    // Сразу STOP + cmd в телеметрии — опрос не откатит лампу на OFF во время тэнов.
+    setPumpOn(true);
+    pushSensorSample(host, "pumpPower", pumpPower, 0.5);
+    setPumpPowerByHost((p) => ({ ...p, [host]: pumpPower }));
+    labTelemetryRef.current?.setPumpPower(host, pumpPower, true);
+    burstDxPumpCurrents();
     try {
       if (direction === "forward" && pumpWithHeaters) {
-        await startHeatersForPump();
+        await startHeatersForPump(session);
+        if (session !== pumpSessionRef.current) return;
       }
       const payload = pumpCommandPayload({
         durationMs: pumpDuration,
         powerPercent: pumpPower,
         direction,
       });
-      const res = await req(pumpCommandSubject(host), payload);
+
+      const res = await withCommandLock(() =>
+        req(pumpCommandSubject(host), payload, 12_000)
+      );
+      if (session !== pumpSessionRef.current) return;
       if (!res.ok) {
+        setPumpOn(false);
+        pushSensorSample(host, "pumpPower", 0, 0.5);
+        setPumpPowerByHost((p) => ({ ...p, [host]: 0 }));
+        labTelemetryRef.current?.setPumpPower(host, 0, false);
         setToast({ text: res.error, error: true });
-        pollPaused.current = false;
         return;
       }
-      setPumpOn(true);
       pushLab(
         "pump",
         "pump",
         true,
         `${direction} power%=${pumpPower} pwm=${payload.power} ms=${pumpDuration}`
       );
-      pushSensorSample(host, "pumpPower", pumpPower, 0.5);
-      setPumpPowerByHost((p) => ({ ...p, [host]: pumpPower }));
-      setTimeout(() => {
+      // Обновить cmd timestamp после реального ACK
+      labTelemetryRef.current?.setPumpPower(host, pumpPower, true);
+      burstDxPumpCurrents();
+      if (pumpTimerRef.current) clearTimeout(pumpTimerRef.current);
+      pumpTimerRef.current = setTimeout(() => {
+        if (session !== pumpSessionRef.current) return;
+        pumpTimerRef.current = null;
         setPumpOn(false);
         pushLab("pump", "pump", false, "duration elapsed");
         pushSensorSample(host, "pumpPower", 0, 0.5);
         setPumpPowerByHost((p) => ({ ...p, [host]: 0 }));
-        pollPaused.current = false;
+        labTelemetryRef.current?.setPumpPower(host, 0, false);
         void refreshDevices();
+        burstDxPumpCurrents();
       }, pumpDuration + 200);
     } catch (e) {
-      pollPaused.current = false;
-      setToast({ text: errText(e), error: true });
+      if (session === pumpSessionRef.current) {
+        setToast({ text: errText(e), error: true });
+        setPumpOn(false);
+        setPumpPowerByHost((p) => ({ ...p, [host]: 0 }));
+        labTelemetryRef.current?.setPumpPower(host, 0, false);
+      }
     } finally {
-      setBusy(null);
+      if (session === pumpSessionRef.current) setBusy(null);
     }
   }
 
   async function stopPump() {
-    pollPaused.current = true;
+    // Отменить in-flight start (тэны / ACK) и авто-стоп по ms.
+    pumpSessionRef.current += 1;
+    if (pumpTimerRef.current) {
+      clearTimeout(pumpTimerRef.current);
+      pumpTimerRef.current = null;
+    }
+    setPumpOn(false);
+    pushSensorSample(host, "pumpPower", 0, 0.5);
+    setPumpPowerByHost((p) => ({ ...p, [host]: 0 }));
+    labTelemetryRef.current?.setPumpPower(host, 0, false);
     setBusy("pump");
     try {
-      await req(pumpStopSubject(host));
-      setPumpOn(false);
+      const res = await withCommandLock(() => req(pumpStopSubject(host)));
+      if (!res.ok) {
+        setToast({ text: res.error, error: true });
+        return;
+      }
       pushLab("pump", "pump", false, "stop");
-      pushSensorSample(host, "pumpPower", 0, 0.5);
-      setPumpPowerByHost((p) => ({ ...p, [host]: 0 }));
     } catch (e) {
       setToast({ text: errText(e), error: true });
     } finally {
       setBusy(null);
-      pollPaused.current = false;
+      burstDxPumpCurrents();
     }
   }
 
   async function togglePump() {
-    if (pumpOn) await stopPump();
+    const running =
+      pumpOn === true || (pumpPowerByHost[host] ?? 0) > 0 || busy === "pump";
+    if (running) await stopPump();
     else await startPump("forward");
   }
 
   async function startHeater(heaterId: string) {
     pollPaused.current = true;
+    labTelemetryRef.current?.pause();
     setBusy(`heater-${heaterId}`);
     try {
       const prev = heaterTimers.current.get(heaterId);
@@ -1241,7 +1359,16 @@ export function ModulesPage() {
         return;
       }
       setHeaters((h) => ({ ...h, [heaterId]: true }));
-      pushLab("heater", heaterId, true, `target=${heaterTarget}C`);
+      const short =
+        heaterId === "heater1" ? ("heater1" as const) : ("heater2" as const);
+      const pwmEst = estimatePwmForHeater(heaterId);
+      labTelemetryRef.current?.setHeater(host, short, true, pwmEst);
+      setHeaterPwmByHost((p) => ({
+        ...p,
+        [host]: { ...p[host], [short]: pwmEst },
+      }));
+      pushSensorSample(host, `${short}_pwm`, pwmEst, 0.5);
+      pushLab("heater", heaterId, true, `target=${heaterTarget}C pwm~${pwmEst}`);
       const autoMs = Math.max(1, heaterAutoStopSec) * 1000;
       const timer = setTimeout(() => {
         void stopHeater(heaterId);
@@ -1252,6 +1379,8 @@ export function ModulesPage() {
     } finally {
       setBusy(null);
       pollPaused.current = false;
+      labTelemetryRef.current?.resume();
+      void refreshDevices();
     }
   }
 
@@ -1260,14 +1389,25 @@ export function ModulesPage() {
     if (prev) clearTimeout(prev);
     heaterTimers.current.delete(heaterId);
     pollPaused.current = true;
+    labTelemetryRef.current?.pause();
     try {
       await req(heaterStopSubject(host, heaterId));
       setHeaters((h) => ({ ...h, [heaterId]: false }));
       pushLab("heater", heaterId, false, "stop");
+      const short =
+        heaterId === "heater1" ? ("heater1" as const) : ("heater2" as const);
+      labTelemetryRef.current?.setHeater(host, short, false, 0);
+      setHeaterPwmByHost((prev) => ({
+        ...prev,
+        [host]: { ...prev[host], [short]: 0 },
+      }));
+      pushSensorSample(host, `${short}_pwm`, 0, 0.5);
     } catch (e) {
       console.warn("[modules] stop heater", e);
     } finally {
       pollPaused.current = false;
+      labTelemetryRef.current?.resume();
+      void refreshDevices();
     }
   }
 
@@ -1533,6 +1673,172 @@ export function ModulesPage() {
       setToast({ text: "Пена: готово" });
     } catch (e) {
       setToast({ text: errText(e), error: true });
+    } finally {
+      setBusy(null);
+      pollPaused.current = false;
+    }
+  }
+
+  function requireLabUnlock(): boolean {
+    if (
+      typeof sessionStorage !== "undefined" &&
+      sessionStorage.getItem("sm.writeUnlocked") === "1"
+    ) {
+      return true;
+    }
+    setToast({
+      text: "Разблокируйте правки в Настройках (сервисный пароль)",
+      error: true,
+    });
+    return false;
+  }
+
+  async function runLabScenario(scenario: LabScenario) {
+    if (scenario.risk !== "read" && !requireLabUnlock()) return;
+    if (scenario.risk === "danger") {
+      if (
+        !window.confirm(`${scenario.label}: остановить текущую операцию CM?`)
+      ) {
+        return;
+      }
+    }
+    const eta = scenario.expectedSec
+      ? `~${Math.round(scenario.expectedSec / 60)} мин (${scenario.expectedSec} с)`
+      : null;
+    if (scenario.risk === "service" && scenario.id.includes("milkrinse")) {
+      if (
+        !window.confirm(
+          [
+            `${scenario.label}: реальный ERP milkrinse (coffeemachine.milkrinse!).`,
+            eta ? `Ожидайте ${eta}: насос forward → reverse-циклы.` : null,
+            "Host → milk. Ток pump_R_IS (V) с DX UI :8000 — не отрицательный при reverse.",
+            "Stop CM остаётся доступным. Продолжить?",
+          ]
+            .filter(Boolean)
+            .join("\n")
+        )
+      ) {
+        return;
+      }
+      if (host !== "milk") setHost("milk");
+      setShowCharts(true);
+      setShowSensorCharts(true);
+    }
+    const payload = scenario.buildPayload({ host, hwid });
+    smLog("info", "lab-scenario", scenario.id, {
+      subject: scenario.subject,
+      payload,
+      expectedSec: scenario.expectedSec,
+    });
+    const isStop = scenario.id === "stop-cm";
+    // Stop CM не должен ждать конца rinse / блокировать сам себя.
+    const busyToken = {};
+    scenarioBusyToken.current = busyToken;
+    setBusy(isStop ? "scenario-stop-cm" : `scenario-${scenario.id}`);
+    pollPaused.current = false;
+    pushLab(
+      "command",
+      scenario.subject,
+      "request",
+      `${JSON.stringify(payload)}${eta ? ` · ETA ${eta}` : ""}`
+    );
+    if (eta && !isStop) {
+      setToast({
+        text: `${scenario.label}: идёт ${eta}. Ток — pump_R_IS (V) у milk.`,
+      });
+    }
+    try {
+      // milkrinse: poll — не блокирует DX/status опрос.
+      // Stop: command — пробивает очередь, чтобы оборвать opsq.
+      const res = await req(
+        scenario.subject,
+        payload,
+        scenario.timeoutMs ?? 8_000,
+        isStop
+          ? "command"
+          : scenario.id.includes("milkrinse") || scenario.risk === "read"
+            ? "poll"
+            : "command"
+      );
+      if (res.ok) {
+        pushLab(
+          "command",
+          scenario.subject,
+          "ok",
+          JSON.stringify(res.data).slice(0, 240)
+        );
+        setToast({ text: `${scenario.label} ok` });
+        smLog("info", "lab-scenario", `${scenario.id} ok`);
+      } else {
+        pushLab("command", scenario.subject, "error", res.error);
+        setToast({ text: res.error, error: true });
+        smLog("error", "lab-scenario", `${scenario.id} fail`, {
+          error: res.error,
+        });
+      }
+      void refreshDevices();
+      void pollDxPumpCurrents();
+    } finally {
+      // После Stop / новой сценарии старый milkrinse не затирает busy.
+      if (scenarioBusyToken.current === busyToken) setBusy(null);
+    }
+  }
+
+  async function runBrewLab() {
+    if (!requireLabUnlock()) return;
+    if (
+      !window.confirm(
+        "Brew Lab нальёт в группу (qty = мс насоса). Убедитесь, что стакан на месте. Продолжить?"
+      )
+    ) {
+      return;
+    }
+    const parts: Array<{
+      type: BrewLabPartType;
+      qtyMs: number;
+      tempC: number;
+      productionOrder: number;
+    }> = [
+      {
+        type: brewType,
+        qtyMs: brewQtyMs,
+        tempC: brewTempC,
+        productionOrder: 1,
+      },
+    ];
+    if (brewAddMilk) {
+      parts.push({
+        type: "milk",
+        qtyMs: brewMilkQtyMs,
+        tempC: brewMilkTempC,
+        productionOrder: 2,
+      });
+    }
+    const payload = buildBrewLabPayload({
+      hwid: brewHwid || hwid || "dx",
+      parts,
+    });
+    smLog("info", "brew-lab", "start", payload);
+    pollPaused.current = true;
+    setBusy("brew-lab");
+    pushLab("command", NATS_SUBJECTS.brew, "request", JSON.stringify(payload));
+    try {
+      const res = await req(NATS_SUBJECTS.brew, payload, 90_000);
+      if (res.ok) {
+        pushLab(
+          "command",
+          NATS_SUBJECTS.brew,
+          "ok",
+          JSON.stringify(res.data).slice(0, 240)
+        );
+        setToast({ text: "Brew Lab ok" });
+        smLog("info", "brew-lab", "ok");
+      } else {
+        pushLab("command", NATS_SUBJECTS.brew, "error", res.error);
+        setToast({ text: res.error, error: true });
+        smLog("error", "brew-lab", "fail", { error: res.error });
+      }
+      void refreshDevices();
     } finally {
       setBusy(null);
       pollPaused.current = false;
@@ -2417,11 +2723,66 @@ export function ModulesPage() {
         <ToggleRow
           label={`Насос ${host}`}
           code={`pumps.${host}`}
-          on={pumpOn}
+          on={
+            pumpOn === true || (pumpPowerByHost[host] ?? 0) > 0 || busy === "pump"
+              ? true
+              : pumpOn
+          }
           disabled={controlsDisabled}
           onToggle={() => void togglePump()}
-          actionLabel={pumpOn ? "STOP" : "START"}
+          actionLabel={
+            pumpOn === true ||
+            (pumpPowerByHost[host] ?? 0) > 0 ||
+            busy === "pump"
+              ? "STOP"
+              : "START"
+          }
         />
+        {(host === "milk" || host === "coffee") && (
+          <p className="muted" style={{ marginTop: 8, marginBottom: 0 }}>
+            R_IS:{" "}
+            <strong>
+              {pumpCurrentByHost[host] != null
+                ? `${pumpCurrentByHost[host]!.toFixed(3)} V`
+                : "—"}
+            </strong>
+            {" · L_IS: "}
+            <strong>
+              {pumpCurrentLByHost[host] != null
+                ? `${pumpCurrentLByHost[host]!.toFixed(3)} V`
+                : "—"}
+            </strong>
+            {" · "}
+            ШИМ~:{" "}
+            <strong>
+              {heaterPwmByHost[host]?.heater1 != null
+                ? `${Math.round(heaterPwmByHost[host]!.heater1!)}%`
+                : "—"}
+              {" / "}
+              {heaterPwmByHost[host]?.heater2 != null
+                ? `${Math.round(heaterPwmByHost[host]!.heater2!)}%`
+                : "—"}
+            </strong>
+            <span className="muted" style={{ fontSize: 11 }}>
+              {" "}
+              (оценка PID start 25–75%)
+            </span>
+            <HelpTip controlId="modules.dxUi" />
+            <br />
+            <span style={{ fontSize: 11 }}>
+              В — сырое напряжение АЦП (Type:V в drinkx), не амперы. Поле{" "}
+              <code>ms</code> — сколько крутить насос (до 60 с). Ошибка{" "}
+              <code>timeout 2000ms</code> была ACK NATS (исправлено до 12 с), не
+              лимит длительности.
+            </span>
+            {dxUiStatus ? (
+              <>
+                <br />
+                <span style={{ fontSize: 11 }}>{dxUiStatus}</span>
+              </>
+            ) : null}
+          </p>
+        )}
         {(host === "milk" || host === "coffee") && !pumpOn ? (
           <div className="row" style={{ marginTop: 8 }}>
             <ActionButton
@@ -2600,6 +2961,195 @@ export function ModulesPage() {
         ) : null}
       </div>
 
+      <div className="panel panel-compact">
+        <h2 className="row" style={{ gap: 8, alignItems: "center" }}>
+          Сценарии
+          <HelpTip controlId="lab.scenarios" />
+        </h2>
+        <p className="muted" style={{ marginTop: 0 }}>
+          Реальные ERP payload на NATS (как cm-drv / ComplexOS), не mock.
+          Service/danger — после сервисного пароля. «?» — что ждать по кнопке.
+        </p>
+        <div
+          className="stack"
+          style={{ gap: 10, marginTop: 8 }}
+        >
+          {scenariosForHost(host).map((s) => (
+            <div
+              key={s.id}
+              className="row"
+              style={{
+                flexWrap: "wrap",
+                gap: 8,
+                alignItems: "flex-start",
+              }}
+            >
+              <ActionButton
+                helpId={s.helpId}
+                disabled={
+                  controlsDisabled ||
+                  (s.id === "stop-cm"
+                    ? busy === "scenario-stop-cm"
+                    : busy !== null)
+                }
+                onClick={() => void runLabScenario(s)}
+              >
+                {s.label}
+                {s.expectedSec && s.expectedSec >= 30
+                  ? ` (~${Math.ceil(s.expectedSec / 60)} мин)`
+                  : ""}
+              </ActionButton>
+              <span className="muted" style={{ flex: "1 1 220px", fontSize: 12 }}>
+                {scenarioHint(s)}
+              </span>
+            </div>
+          ))}
+          {(host === "milk" || host === "coffee") && !pumpOn ? (
+            <div
+              className="row"
+              style={{
+                flexWrap: "wrap",
+                gap: 8,
+                alignItems: "flex-start",
+              }}
+            >
+              <ActionButton
+                helpId="modules.pumpReverse"
+                disabled={controlsDisabled}
+                onClick={() => void startPump("reverse")}
+              >
+                Pump reverse
+              </ActionButton>
+              <span className="muted" style={{ flex: "1 1 220px", fontSize: 12 }}>
+                Короткий реверс насоса (pumps.*! direction=reverse). Не rinse —
+                только проверка направления. Смотрите ток на графике.
+              </span>
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="panel panel-compact">
+        <h2 className="row" style={{ gap: 8, alignItems: "center" }}>
+          Brew Lab
+          <HelpTip controlId="lab.brew" />
+        </h2>
+        <p className="muted" style={{ marginTop: 0 }}>
+          qty — <strong>миллисекунды</strong> насоса, не мл. Нужен сервисный
+          пароль + confirm.
+        </p>
+        <div className="row" style={{ flexWrap: "wrap", gap: 10 }}>
+          <label className="muted lab-param">
+            hwid
+            <HelpTip controlId="lab.brew.hwid" />
+            <select
+              value={brewHwid}
+              disabled={!live || !unlocked}
+              onChange={(e) => setBrewHwid(e.target.value)}
+            >
+              {[...BREW_LAB_DEFAULTS.hwidOptions, hwid]
+                .filter((v, i, a) => a.indexOf(v) === i)
+                .map((opt) => (
+                  <option key={opt} value={opt}>
+                    {opt}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <label className="muted lab-param">
+            type
+            <select
+              value={brewType}
+              disabled={!live || !unlocked}
+              onChange={(e) => setBrewType(e.target.value as BrewLabPartType)}
+            >
+              <option value="coffee">coffee</option>
+              <option value="milk">milk</option>
+              <option value="water">water</option>
+            </select>
+          </label>
+          <label className="muted lab-param">
+            qty мс
+            <HelpTip controlId="lab.brew.qty" />
+            <input
+              type="number"
+              min={200}
+              max={60000}
+              step={100}
+              value={brewQtyMs}
+              disabled={!live || !unlocked}
+              onChange={(e) => setBrewQtyMs(Number(e.target.value) || 0)}
+              onKeyDown={(e) =>
+                onEnterNavigate(e, {
+                  onAction: () => {
+                    if (unlocked) void runBrewLab();
+                  },
+                })
+              }
+            />
+          </label>
+          <label className="muted lab-param">
+            temp °C
+            <HelpTip controlId="lab.brew.temp" />
+            <input
+              type="number"
+              min={20}
+              max={95}
+              value={brewTempC}
+              disabled={!live || !unlocked}
+              onChange={(e) => setBrewTempC(Number(e.target.value) || 65)}
+            />
+          </label>
+          <label className="muted lab-param">
+            <input
+              type="checkbox"
+              checked={brewAddMilk}
+              disabled={!live || !unlocked}
+              onChange={(e) => setBrewAddMilk(e.target.checked)}
+            />
+            + milk part
+          </label>
+          {brewAddMilk ? (
+            <>
+              <label className="muted lab-param">
+                milk qty мс
+                <input
+                  type="number"
+                  min={200}
+                  max={60000}
+                  value={brewMilkQtyMs}
+                  disabled={!live || !unlocked}
+                  onChange={(e) =>
+                    setBrewMilkQtyMs(Number(e.target.value) || 0)
+                  }
+                />
+              </label>
+              <label className="muted lab-param">
+                milk °C
+                <input
+                  type="number"
+                  min={20}
+                  max={95}
+                  value={brewMilkTempC}
+                  disabled={!live || !unlocked}
+                  onChange={(e) =>
+                    setBrewMilkTempC(Number(e.target.value) || 65)
+                  }
+                />
+              </label>
+            </>
+          ) : null}
+          <ActionButton
+            helpId="lab.brew"
+            variant="primary"
+            disabled={controlsDisabled || !unlocked || busy !== null}
+            onClick={() => void runBrewLab()}
+          >
+            Brew
+          </ActionButton>
+        </div>
+      </div>
+
       {host === "water" ? (
         <div className="panel">
           <h2>Калибровка флоуметра</h2>
@@ -2663,7 +3213,14 @@ export function ModulesPage() {
 
         <div className="lab-col lab-sensors-sticky">
       <div className="panel panel-compact panel-sensors">
-        <h2>Датчики комплекса</h2>
+        <h2>
+          Датчики комплекса <HelpTip controlId="modules.dxUi" />
+        </h2>
+        <p className="muted" style={{ marginTop: 0, fontSize: 12 }}>
+          R_IS / L_IS — DX UI (вольты). Мощность насоса — pumps.status. ШИМ —
+          оценка heaters.status. Жёлтый = опрос замер (не mid-tick / не во время
+          команды). Пустой ток → IP milk=.44 coffee=.45.
+        </p>
         <div className="lab-sensor-module-toggles">
           {DRINKX_HOSTS.map((mod) => (
             <label key={mod} className="lab-chart-check">
@@ -2684,11 +3241,19 @@ export function ModulesPage() {
         {DRINKX_HOSTS.filter((m) => sensorModulesVisible[m] !== false).map(
           (mod) => {
             const keys = expectedTempKeys(mod);
+            const now = Date.now();
+            const pollStale = isTelemetryStale(labSnap, STALE_MS.temps, now);
+            const actStale = isTelemetryStale(
+              labSnap,
+              STALE_MS.actuators,
+              now
+            );
             type Row = {
               key: string;
               label: string;
               value: string;
               muted: boolean;
+              stale: boolean;
             };
             const rows: Row[] = keys.map((k) => {
               const sk = seriesKey(mod, k);
@@ -2698,6 +3263,7 @@ export function ModulesPage() {
                 label: TEMP_SENSOR_LABELS[k],
                 value: v != null ? `${v.toFixed(1)} °C` : "—",
                 muted: mutedSensorKeys.includes(sk),
+                stale: v != null && pollStale,
               };
             });
             if (mod === "water") {
@@ -2712,6 +3278,7 @@ export function ModulesPage() {
                   muted: mutedSensorKeys.includes(
                     seriesKey("water", "waterPressure")
                   ),
+                  stale: waterPressure != null && pollStale,
                 },
                 {
                   key: seriesKey("water", "waterTotalPulses"),
@@ -2720,52 +3287,63 @@ export function ModulesPage() {
                   muted: mutedSensorKeys.includes(
                     seriesKey("water", "waterTotalPulses")
                   ),
+                  stale: waterPulses != null && pollStale,
                 }
               );
             }
             if (mod === "milk" || mod === "coffee") {
               const cur = pumpCurrentByHost[mod];
+              const curL = pumpCurrentLByHost[mod];
               const pow =
                 pumpPowerByHost[mod] ??
                 (mod === host && pumpOn ? pumpPower : null);
+              const pwm1 = heaterPwmByHost[mod]?.heater1;
+              const pwm2 = heaterPwmByHost[mod]?.heater2;
               rows.push(
                 {
                   key: seriesKey(mod, "pumpPower"),
                   label: "Насос мощность",
                   value: pow != null ? `${pow} %` : "—",
                   muted: mutedSensorKeys.includes(seriesKey(mod, "pumpPower")),
+                  stale: pow != null && actStale,
                 },
                 {
                   key: seriesKey(mod, "pumpCurrent"),
-                  label: "Насос ток",
-                  value: cur != null ? `${cur.toFixed(2)} A` : "—",
+                  label: "Насос R_IS",
+                  value: cur != null ? `${cur.toFixed(3)} V` : "—",
                   muted: mutedSensorKeys.includes(
                     seriesKey(mod, "pumpCurrent")
                   ),
+                  stale: cur != null && pollStale,
+                },
+                {
+                  key: seriesKey(mod, "pumpCurrentL"),
+                  label: "Насос L_IS",
+                  value: curL != null ? `${curL.toFixed(3)} V` : "—",
+                  muted: mutedSensorKeys.includes(
+                    seriesKey(mod, "pumpCurrentL")
+                  ),
+                  stale: curL != null && pollStale,
+                },
+                {
+                  key: seriesKey(mod, "heater1_pwm"),
+                  label: "Тэн 1 ШИМ",
+                  value: pwm1 != null ? `${pwm1.toFixed(0)} %` : "—",
+                  muted: mutedSensorKeys.includes(
+                    seriesKey(mod, "heater1_pwm")
+                  ),
+                  stale: pwm1 != null && actStale,
+                },
+                {
+                  key: seriesKey(mod, "heater2_pwm"),
+                  label: "Тэн 2 ШИМ",
+                  value: pwm2 != null ? `${pwm2.toFixed(0)} %` : "—",
+                  muted: mutedSensorKeys.includes(
+                    seriesKey(mod, "heater2_pwm")
+                  ),
+                  stale: pwm2 != null && actStale,
                 }
               );
-            }
-            if (mod === host) {
-              rows.push({
-                key: `${mod}.__pump_state`,
-                label: "Насос",
-                value:
-                  pumpOn == null ? "?" : pumpOn ? `ON · ${pumpPower}%` : "OFF",
-                muted: false,
-              });
-              for (const hid of HEATER_IDS) {
-                rows.push({
-                  key: `${mod}.__${hid}`,
-                  label: HEATER_LABELS[hid],
-                  value:
-                    heaters[hid] == null
-                      ? "?"
-                      : heaters[hid]
-                        ? "ON"
-                        : "OFF",
-                  muted: false,
-                });
-              }
             }
             const active = rows.filter((r) => !r.muted);
             const muted = rows.filter((r) => r.muted);
@@ -2778,13 +3356,15 @@ export function ModulesPage() {
                     <button
                       key={row.key}
                       type="button"
-                      className={`sensor-row sensor-row-btn${row.muted ? " sensor-muted" : ""}`}
+                      className={`sensor-row sensor-row-btn${row.muted ? " sensor-muted" : ""}${row.stale ? " sensor-stale" : ""}`}
                       title={
-                        row.key.startsWith(`${mod}.__`)
-                          ? undefined
-                          : row.muted
-                            ? "Включить отображение"
-                            : "Скрыть в конец списка"
+                        row.stale
+                          ? "Данные устарели (давно не обновлялись)"
+                          : row.key.startsWith(`${mod}.__`)
+                            ? undefined
+                            : row.muted
+                              ? "Включить отображение"
+                              : "Скрыть в конец списка"
                       }
                       disabled={row.key.startsWith(`${mod}.__`)}
                       onClick={() => {
@@ -3041,92 +3621,23 @@ export function ModulesPage() {
           ) : null}
         </div>
       </div>
-
-      <SyrupFlashPanel
-        busy={busy}
-        setBusy={setBusy}
-        onToast={(t) => setToast(t)}
-      />
-
-      <div className="panel">
-        <h2>
-          <button
-            type="button"
-            className="linkish"
-            onClick={() => setShowLegacy((v) => !v)}
-            style={{
-              background: "none",
-              border: "none",
-              color: "inherit",
-              cursor: "pointer",
-              padding: 0,
-              font: "inherit",
-            }}
-          >
-            Legacy / flash_obraz {showLegacy ? "▾" : "▸"}
-          </button>
-        </h2>
-        {showLegacy ? (
-          <>
-            <p className="lead">
-              <code>flash_obraz</code> — ansible-деплой образа (отдельное окно;
-              полный in-app port позже). Нужны Host <code>ansible</code> /{" "}
-              <code>pusk</code> в ssh config.
-            </p>
-            <div className="row">
-              <ActionButton
-                disabled={busy !== null || !canTryNats}
-                onClick={() =>
-                  void window.desktop
-                    .launchFleetTool({
-                      tool: "module_test",
-                      seriesLabel: session.seriesLabel ?? undefined,
-                    })
-                    .catch((e) => setToast({ text: errText(e), error: true }))
-                }
-              >
-                module_test
-              </ActionButton>
-              <ActionButton
-                disabled={busy !== null}
-                onClick={() =>
-                  void window.desktop
-                    .launchFleetTool({ tool: "sirup_test" })
-                    .catch((e) => setToast({ text: errText(e), error: true }))
-                }
-              >
-                sirup_test
-              </ActionButton>
-              <ActionButton
-                disabled={busy !== null}
-                onClick={() =>
-                  void window.desktop
-                    .launchFleetTool({ tool: "flash_sirup" })
-                    .catch((e) => setToast({ text: errText(e), error: true }))
-                }
-              >
-                flash_sirup (окно)
-              </ActionButton>
-              <ActionButton
-                helpId="modules.flashObraz"
-                disabled={busy !== null}
-                onClick={() =>
-                  void window.desktop
-                    .launchFleetTool({
-                      tool: "flash_obraz",
-                      seriesLabel: session.seriesLabel ?? undefined,
-                    })
-                    .catch((e) => setToast({ text: errText(e), error: true }))
-                }
-              >
-                flash_obraz
-              </ActionButton>
-            </div>
-          </>
-        ) : null}
-      </div>
     </div>
   );
+}
+
+function scenarioHint(s: LabScenario): string {
+  switch (s.id) {
+    case "status-module":
+      return "Чтение coffeemachine.status — безопасно. Ответ в логе Lab.";
+    case "milkrinse-micro":
+      return "ERP Micro-rinse ~2.5 мин. Ток pump_R_IS (V) с DX UI milk — при reverse не отрицательный. Stop CM не блокируется.";
+    case "milkrinse-long":
+      return "tubesLength=1500 ≈ 4 мин. Ток (V) на milk; reverse = тот же канал, без знака. Stop CM доступен.";
+    case "stop-cm":
+      return "Оборвать brew/мойку/rinse. Доступна во время сценария — не ждёт конца rinse.";
+    default:
+      return s.subject;
+  }
 }
 
 function ToggleRow(props: {

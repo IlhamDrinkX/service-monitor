@@ -142,6 +142,32 @@ async function audit(entry: Record<string, unknown>): Promise<void> {
   await appendFile(join(dir, "drinkx-audit.jsonl"), line, "utf8");
 }
 
+/**
+ * DX UI HTML с модуля через SSH (curl localhost:8000).
+ * Fallback, когда LocalForward :8082/:8083 не отвечает.
+ */
+export async function fetchDxUiHtmlViaSsh(
+  role: DrinkxModuleRole
+): Promise<{ ok: true; html: string } | { ok: false; error: string }> {
+  try {
+    const { label } = moduleEndpoint(role);
+    const { stdout, stderr, code } = await execOnModule(
+      role,
+      "curl -sS --max-time 4 http://127.0.0.1:8000/",
+      { timeoutMs: 12_000 }
+    );
+    if (!stdout || stdout.length < 20) {
+      return {
+        ok: false,
+        error: `пустой DX UI через SSH (${label})${stderr ? `: ${stderr.slice(0, 120)}` : ""}${code != null ? ` code=${code}` : ""}`,
+      };
+    }
+    return { ok: true, html: stdout };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export async function readDrinkxJson(role: DrinkxModuleRole): Promise<
   | {
       ok: true;

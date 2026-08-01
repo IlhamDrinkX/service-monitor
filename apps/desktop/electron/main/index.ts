@@ -36,6 +36,8 @@ import {
   natsRequestMany,
   natsStatus,
   natsSubscribeStatus,
+  natsSubscribeBus,
+  natsUnsubscribeBus,
   natsUpdateConfig,
 } from "./nats-service";
 import { syrupCheckSsh, syrupModbusScan } from "./syrup-service";
@@ -577,6 +579,62 @@ function registerIpc(): void {
   ipcMain.handle("nats:subscribeStatus", async () => {
     try {
       await natsSubscribeStatus();
+      return { ok: true as const };
+    } catch (e) {
+      return {
+        ok: false as const,
+        error: e instanceof Error ? e.message : String(e),
+      };
+    }
+  });
+  ipcMain.handle(
+    "dxUi:pumpCurrents",
+    async (
+      _e,
+      input?: { mode?: "remote" | "local" | null; timeoutMs?: number }
+    ) => {
+      try {
+        const { fetchDxUiSnapshots } = await import("./dx-ui-fetch");
+        const data = await fetchDxUiSnapshots(
+          input?.mode ?? null,
+          input?.timeoutMs ?? 2_000
+        );
+        return {
+          ok: true as const,
+          milk: data.milk,
+          coffee: data.coffee,
+        };
+      } catch (e) {
+        const empty = {
+          pump_R_IS: null,
+          pump_L_IS: null,
+          heater1_pwm: null,
+          heater2_pwm: null,
+        };
+        return {
+          ok: false as const,
+          error: e instanceof Error ? e.message : String(e),
+          milk: { ...empty },
+          coffee: { ...empty },
+        };
+      }
+    }
+  );
+  ipcMain.handle("nats:subscribeBus", async (_e, subjects: string[]) => {
+    try {
+      const list = Array.isArray(subjects) ? subjects : [];
+      const res = await natsSubscribeBus(list);
+      return { ok: true as const, subjects: res.subjects };
+    } catch (e) {
+      return {
+        ok: false as const,
+        error: e instanceof Error ? e.message : String(e),
+      };
+    }
+  });
+  ipcMain.handle("nats:unsubscribeBus", async () => {
+    try {
+      await natsUnsubscribeBus();
       return { ok: true as const };
     } catch (e) {
       return {

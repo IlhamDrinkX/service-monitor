@@ -9,3 +9,5 @@ coverage/
 *.tsbuildinfo
 apps/desktop/release/
 debug-logs/
+.agent-notes/
+AGENT_NOTES.md

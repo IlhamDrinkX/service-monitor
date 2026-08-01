@@ -50,6 +50,15 @@ describe("dx-ui-stat", () => {
     assert.equal(snap.heater2_pwm, 15);
   });
 
+  it("extracts pump_R_IS from truncated HTML (brew-sized page head)", () => {
+    const stat = JSON.stringify({ pump_R_IS: 1.42, pump_L_IS: 0.2 });
+    const hugeTail = "x".repeat(200_000);
+    const html = `<div>${stat}</div><script>let data = [[1]];${hugeTail}</script>`;
+    const snap = parseDxUiSnapshot(html.slice(0, 80_000));
+    assert.equal(snap.pump_R_IS, 1.42);
+    assert.equal(snap.pump_L_IS, 0.2);
+  });
+
   it("returns null on garbage", () => {
     assert.equal(parseDxUiStatHtml("<html></html>"), null);
     assert.equal(extractPumpRisFromDxStat(null), null);

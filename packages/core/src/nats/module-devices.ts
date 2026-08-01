@@ -29,7 +29,114 @@ export const VALVE_LABELS: Record<string, string> = {
   drysideValve: "Клапан №5 (воздушный)",
   air: "Пневмораспределитель №6",
   commonValve: "Сливной клапан (блок №6)",
+  msValve1: "Молочный клапан 1",
+  msValve2: "Молочный клапан 2",
+  msValve3: "Молочный клапан 3",
+  msValve4: "Молочный клапан 4",
+  msValve5: "Молочный клапан 5",
+  msValve6: "Сливной клапан (блок №6)",
 };
+
+/** Логические id холодильных клапанов (complexos.valves.switched / status.*Valves). */
+export const MILK_SYSTEM_VALVE_IDS = [
+  "msValve1",
+  "msValve2",
+  "msValve3",
+  "msValve4",
+  "msValve5",
+  "msValve6",
+] as const;
+
+export type MilkSystemValveId = (typeof MILK_SYSTEM_VALVE_IDS)[number];
+
+export function milkSystemValveId(valveNumber: number): MilkSystemValveId | null {
+  if (valveNumber < 1 || valveNumber > 6) return null;
+  return `msValve${valveNumber}` as MilkSystemValveId;
+}
+
+export function milkSystemValveNumber(id: string): number | null {
+  const m = /^msValve(\d+)$/.exec(id);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return n >= 1 && n <= 6 ? n : null;
+}
+
+/**
+ * Открытые клапаны холодильника/рецепта из coffeemachine.status.
+ * Facade: milkValves / coffeeValves; real-cm: valves (number[]).
+ */
+export function extractOpenValveNumbers(statusResponse: unknown): number[] | null {
+  if (!statusResponse || typeof statusResponse !== "object") return null;
+  const r = statusResponse as Record<string, unknown>;
+  const result =
+    r.result && typeof r.result === "object"
+      ? (r.result as Record<string, unknown>)
+      : null;
+  const src = result ?? r;
+  const candidates = [
+    src.milkValves,
+    src.coffeeValves,
+    src.waterValves,
+    src.valves,
+    result?.milkValves,
+    result?.coffeeValves,
+  ];
+  for (const c of candidates) {
+    if (!Array.isArray(c)) continue;
+    const nums = c
+      .map((x) => Number(x))
+      .filter((n) => Number.isFinite(n) && n >= 0);
+    return nums;
+  }
+  return null;
+}
+
+/**
+ * Объединить списки открытых клапанов (milk+coffee facade / bus) → UI 1…6.
+ *
+ * Нумерация ERP (cm-drv valves-v2 + dump-devices milk-N):
+ * - bus `complexos.valves.switched` / valves.read() — индексы после unOffset;
+ *   milk-1 в osconfig = `[1]`, milk-2 = `[2]`, … (канал 0 часто не используется).
+ * - UI «Молочный клапан N» = тот же номер N, что в milk-N.valves / debug-valves.
+ *
+ * Конвертим +1 **только** если в списке есть `0` (явный 0-based набор).
+ * Старый эвристический `every <= 5 → +1` ломал отображение: bus `[1]` → UI «2»
+ * (клик по 1 зажигал лампу 2; закрытие «2» слало [2] и не гасило канал 1).
+ */
+export function mergeOpenValveNumbers(
+  ...lists: Array<number[] | null | undefined>
+): number[] {
+  const raw: number[] = [];
+  for (const list of lists) {
+    if (!list) continue;
+    for (const n of list) {
+      if (Number.isFinite(n) && n >= 0) raw.push(n);
+    }
+  }
+  if (raw.length === 0) return [];
+  const zeroBased = raw.some((n) => n === 0);
+  const set = new Set<number>();
+  for (const n of raw) {
+    const ui = zeroBased ? n + 1 : n;
+    if (ui >= 1 && ui <= 6) set.add(ui);
+  }
+  return [...set].sort((a, b) => a - b);
+}
+
+/** HW/NATS index для debug-valves / milk.valves — совпадает с UI номером (milk-N → N). */
+export function milkSystemValveHwIndex(valveNumber: number): number | null {
+  if (valveNumber < 1 || valveNumber > 6) return null;
+  return valveNumber;
+}
+
+/** Ответ expose с { error: true } (facade debug-valves Not implemented и т.п.). */
+export function natsReplyIsError(data: unknown): boolean {
+  if (!data || typeof data !== "object") return false;
+  const r = data as Record<string, unknown>;
+  if (r.error === true) return true;
+  if (r.success === false) return true;
+  return false;
+}
 
 export const HEATER_IDS = ["heater1", "heater2"] as const;
 export const HEATER_LABELS: Record<string, string> = {
@@ -214,10 +321,11 @@ export function extractHeaterStatus(
 }
 
 /**
- * Оценка ШИМ тэна %.
- * ERP heaters.status / getStatus НЕ отдают PID output; DX UI graph (lastlog)
- * после brew/heatdown часто залипает на старых out1/out2 — нельзя брать как live.
- * При OFF → 0; при ON — как начальный output PidClassic.start в drinkx pid.js.
+ * Оценка ШИМ тэна % — fallback, когда DX UI graph недоступен.
+ * ERP heaters.status НЕ отдаёт PID output.
+ * Live output во время brew берём из DX UI (см. LabTelemetry applyDxCurrents);
+ * после OFF не используем lastlog (залипает).
+ * При OFF → 0; при ON без DX — как PidClassic.start: clamp(25…75, (target−temp)×1.5).
  */
 export function estimateHeaterPwmPercent(
   enabled: boolean | null | undefined,
@@ -338,7 +446,7 @@ export function extractTempMap(
 ): Partial<Record<TempSensorKey, number>> {
   const out: Partial<Record<TempSensorKey, number>> = {};
   for (const s of extractStatusSensors(statusResponse, host)) {
-    if (s.type && s.type !== "temp") continue;
+  if (s.type && s.type !== "temp") continue; // skip *_heater*_power (type=power = temp duplicate, not PWM)
     const key = normalizeTempKey(s.name);
     const num = Number(s.value);
     if (key && Number.isFinite(num)) out[key] = num;
@@ -463,22 +571,26 @@ export function expectedTempKeys(host: DrinkxHost): TempSensorKey[] {
 export function milkSystemValveNumbers(): Array<{
   index: number;
   valveNumber: number;
+  id: MilkSystemValveId;
   label: string;
   isCommon: boolean;
 }> {
   const items = [];
   for (let i = 0; i < 5; i++) {
+    const valveNumber = i + 1;
     items.push({
       index: i,
-      valveNumber: i + 1,
-      label: `Молочный клапан ${i + 1}`,
+      valveNumber,
+      id: milkSystemValveId(valveNumber)!,
+      label: VALVE_LABELS[`msValve${valveNumber}`] ?? `Молочный клапан ${valveNumber}`,
       isCommon: false,
     });
   }
   items.push({
     index: 5,
     valveNumber: 6,
-    label: VALVE_LABELS.commonValve,
+    id: "msValve6" as MilkSystemValveId,
+    label: VALVE_LABELS.msValve6,
     isCommon: true,
   });
   return items;

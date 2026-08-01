@@ -53,6 +53,7 @@ describe("lab-telemetry", () => {
     assert.equal(s.pollPaused, false);
     assert.equal(s.pollInFlight, false);
     assert.deepEqual(s.errors, []);
+    assert.deepEqual(s.hostHealth, {});
   });
 });
 

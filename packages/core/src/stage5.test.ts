@@ -12,6 +12,9 @@ import {
   extractPumpPowerPercent,
   extractHeaterStatus,
   estimateHeaterPwmPercent,
+  extractOpenValveNumbers,
+  mergeOpenValveNumbers,
+  milkSystemValveId,
   pumpPowerToPwm,
   valveCommandSubject,
   defaultHwid,
@@ -99,6 +102,23 @@ describe("stage5 / module-devices", () => {
     assert.equal(estimateHeaterPwmPercent(false, 60, 40), 0);
     assert.equal(estimateHeaterPwmPercent(true, 50, 55), 0);
     assert.equal(estimateHeaterPwmPercent(true, 80, 20), 75);
+  });
+
+  it("maps milk-system open valve numbers to UI 1..6", () => {
+    // явный 0-based (есть 0) → +1
+    assert.deepEqual(mergeOpenValveNumbers([0, 2], [5]), [1, 3, 6]);
+    // ERP milk-1..N / bus без нуля: [1] остаётся клапаном 1 (не 2)
+    assert.deepEqual(mergeOpenValveNumbers([1]), [1]);
+    assert.deepEqual(mergeOpenValveNumbers([1, 3]), [1, 3]);
+    assert.deepEqual(
+      extractOpenValveNumbers({
+        format: "drinkx-1.0",
+        milkValves: [0, 1],
+        coffeeValves: [],
+      }),
+      [0, 1]
+    );
+    assert.equal(milkSystemValveId(3), "msValve3");
   });
 
   it("extracts pump current via deep search", () => {

@@ -2,13 +2,14 @@
  * Lab telemetry: один владелец опроса + pause на команды.
  *
  * Модель как в git HEAD (надёжная), плюс snapshot/stale:
- * - NATS tick ~1.1s: status many + ALL valves(active) + pumps milk/coffee + heaters parallel
+ * - NATS tick ~1.1s: status + valves ALL hosts + pumps milk/coffee/water + heaters
  * - DX timer ~1.5s ОТДЕЛЬНО: только pump_R/L_IS (не на NATS inFlight)
  * - valveHoldUntil: не затирать optimistic лампы
  * - pumps.*! ACK мгновенный (ERP); ток только из DX UI, не из NATS status
  */
 
 import {
+  DRINKX_HOSTS,
   HEATER_IDS,
   MODULE_VALVES,
   NATS_SUBJECTS,
@@ -20,9 +21,13 @@ import {
   extractTempMap,
   extractWaterPressure,
   extractWaterTotalPulses,
+  extractOpenValveNumbers,
+  mergeOpenValveNumbers,
+  natsReplyIsError,
   heaterStatusSubject,
   parseComplexStatusTuple,
   pumpStatusSubject,
+  seriesKey,
   timed,
   valveStatusSubject,
   type DrinkxHost,
@@ -67,7 +72,9 @@ function errText(e: unknown): string {
 }
 
 const NATS_INTERVAL_MS = 1_100;
-const DX_INTERVAL_MS = 1_500;
+const DX_INTERVAL_MS = 1_000;
+/** После bus/cmd не затирать msValve статусом DrinkX (часто устаревшим). */
+const MILK_SYSTEM_HOLD_MS = 3_500;
 
 export class LabTelemetryController {
   private snap: LabSnapshot = emptyLabSnapshot();
@@ -82,6 +89,7 @@ export class LabTelemetryController {
   private natsGeneration = 0;
   private dxGeneration = 0;
   private tickN = 0;
+  private milkSystemHoldUntil = 0;
 
   constructor(private readonly deps: LabTelemetryDeps) {}
 
@@ -190,25 +198,38 @@ export class LabTelemetryController {
     });
   }
 
-  /** Optimistic valve (hold делает ModulesPage). */
-  setValve(baseId: string, enabled: boolean): void {
+  /** Оптимистично / с bus: открытые msValve 1…6. */
+  setMilkSystemOpen(openNumbers: number[], source: "cmd" | "nats" | "dx" = "cmd"): void {
+    const at = Date.now();
+    this.milkSystemHoldUntil = at + MILK_SYSTEM_HOLD_MS;
+    this.emit({
+      ...this.snap,
+      milkSystemOpen: timed(openNumbers, source, at),
+      lastTickAt: Math.max(this.snap.lastTickAt, at),
+    });
+  }
+
+  /** Optimistic valve (hold делает ModulesPage). key = `milk.drain` / seriesKey. */
+  setValve(key: string, enabled: boolean): void {
     const at = Date.now();
     this.emit({
       ...this.snap,
       valves: {
         ...this.snap.valves,
-        [baseId]: timed(enabled, "cmd", at),
+        [key]: timed(enabled, "cmd", at),
       },
       lastTickAt: Math.max(this.snap.lastTickAt, at),
     });
   }
 
-  /** Смена Lab host — сбросить valves, abort in-flight NATS tick. */
+  /**
+   * Смена Lab host — не сбрасываем valves других модулей (график coffee/water
+   * продолжает писать историю, пока UI на milk).
+   */
   onHostChange(): void {
     this.natsGeneration += 1;
     this.emit({
       ...this.snap,
-      valves: {},
       pollInFlight: false,
     });
     if (!this.stopped && this.pauseCount === 0) {
@@ -266,43 +287,34 @@ export class LabTelemetryController {
     };
 
     try {
-      const valveIds = MODULE_VALVES[active];
-      const activeHwid = this.deps.resolveHwid(active);
+      // Клапаны ВСЕХ модулей — график coffee/water не зависит от active Lab host.
+      const valveJobs = DRINKX_HOSTS.flatMap((mod) =>
+        MODULE_VALVES[mod].map(async (baseId) => {
+          const res = await natsReq(
+            valveStatusSubject(mod, baseId),
+            { hwid: this.deps.resolveHwid(mod) },
+            700
+          );
+          return {
+            mod,
+            baseId,
+            key: seriesKey(mod, baseId),
+            enabled: res.ok ? extractEnabledState(res.data) : null,
+          };
+        })
+      );
       const heaterHosts: DrinkxHost[] = [active];
-      // PWM charts for both modules: poll alt host heaters every tick too (2×2=4, ok)
-      for (const h of ["milk", "coffee"] as const) {
+      // ШИМ тэнов на всех модулях (water тоже PID/PWM, не только ON/OFF)
+      for (const h of DRINKX_HOSTS) {
         if (!heaterHosts.includes(h)) heaterHosts.push(h);
       }
 
-      const [tupleRes, valveResults, pumpResults, heaterResults] =
+      const [facadeStatus, valveResults, pumpResults, heaterResults] =
         await Promise.all([
-          window.desktop
-            .natsRequestMany({
-              subject: NATS_SUBJECTS.status,
-              payload: {},
-              timeoutMs: 900,
-              priority: "poll",
-            })
-            .catch((e) => ({
-              ok: false as const,
-              error: errText(e),
-              replies: [] as unknown[],
-            })),
+          natsReq(NATS_SUBJECTS.status, { hwid: "dx" }, 1_200),
+          Promise.all(valveJobs),
           Promise.all(
-            valveIds.map(async (baseId) => {
-              const res = await natsReq(
-                valveStatusSubject(active, baseId),
-                { hwid: activeHwid },
-                700
-              );
-              return {
-                baseId,
-                enabled: res.ok ? extractEnabledState(res.data) : null,
-              };
-            })
-          ),
-          Promise.all(
-            (["milk", "coffee"] as const).map(async (mod) => {
+            (["milk", "coffee", "water"] as const).map(async (mod) => {
               const res = await natsReq(
                 pumpStatusSubject(mod),
                 { hwid: this.deps.resolveHwid(mod) },
@@ -330,36 +342,55 @@ export class LabTelemetryController {
         return;
       }
 
-      // status / temps
-      const replies =
-        tupleRes.ok && Array.isArray(tupleRes.replies)
-          ? tupleRes.replies
-          : [];
-      if (replies.length > 0) {
-        next = this.applyStatusReplies(next, replies, at);
+      // status / temps — facade {hwid:dx} → milkSensors/… + milkValves[]
+      if (facadeStatus.ok && !natsReplyIsError(facadeStatus.data)) {
+        next = this.applyStatusReplies(next, [facadeStatus.data], at);
       } else {
-        const one = await natsReq(NATS_SUBJECTS.status, {}, 1_000);
-        if (this.natsAborted(gen)) {
-          this.emit({ ...this.snap, pollInFlight: false });
-          return;
+        const many = await window.desktop
+          .natsRequestMany({
+            subject: NATS_SUBJECTS.status,
+            payload: {},
+            timeoutMs: 900,
+            priority: "poll",
+          })
+          .catch((e) => ({
+            ok: false as const,
+            error: errText(e),
+            replies: [] as unknown[],
+          }));
+        const replies =
+          many.ok && Array.isArray(many.replies) ? many.replies : [];
+        if (replies.length > 0) {
+          next = this.applyStatusReplies(next, replies, at);
+        } else {
+          const one = await natsReq(NATS_SUBJECTS.status, {}, 1_000);
+          if (this.natsAborted(gen)) {
+            this.emit({ ...this.snap, pollInFlight: false });
+            return;
+          }
+          if (one.ok) next = this.applyStatusReplies(next, [one.data], at);
+          else errors.push(`status: ${one.error}`);
         }
-        if (one.ok) next = this.applyStatusReplies(next, [one.data], at);
-        else errors.push(`status: ${one.error}`);
       }
 
-      // valves — never apply null; respect hold (preserve live optimistic)
+      // valves — ключ seriesKey(mod, id); never apply null; respect hold
       {
         const hold = this.deps.valveHoldUntil;
         const now = Date.now();
         const valves = { ...next.valves };
         const liveValves = this.snap.valves;
-        for (const { baseId, enabled } of valveResults) {
-          if (hold && (hold.get(baseId) ?? 0) > now) {
-            if (liveValves[baseId]) valves[baseId] = liveValves[baseId]!;
+        for (const { mod, baseId, key, enabled } of valveResults) {
+          const holdUntil =
+            hold?.get(key) ?? hold?.get(baseId) ?? 0;
+          if (holdUntil > now) {
+            if (liveValves[key]) valves[key] = liveValves[key]!;
+            else if (liveValves[baseId] && mod === active) {
+              valves[key] = liveValves[baseId]!;
+            }
             continue;
           }
           if (enabled === null) continue;
-          valves[baseId] = timed(enabled, "nats", at);
+          valves[key] = timed(enabled, "nats", at);
         }
         next = { ...next, valves };
       }
@@ -373,7 +404,7 @@ export class LabTelemetryController {
         next = this.applyPumpStatus(next, mod, res.data, at);
       }
 
-      // heaters + estimated PWM
+      // heaters + estimated PWM (не из status *_heater*_power — это дубль temp)
       for (const { mod, hid, res } of heaterResults) {
         if (!res.ok) {
           errors.push(`heater.${mod}.${hid}: ${res.error}`);
@@ -386,6 +417,45 @@ export class LabTelemetryController {
           res.data,
           at
         );
+      }
+
+      // Per-host NATS reachability (pump reply and/or temps from status)
+      {
+        const hostHealth: LabSnapshot["hostHealth"] = { ...next.hostHealth };
+        const pumpOk = new Map<DrinkxHost, boolean>();
+        for (const { mod, res } of pumpResults) {
+          pumpOk.set(mod, res.ok && !natsReplyIsError(res.data));
+        }
+        const heaterOk = new Map<DrinkxHost, boolean>();
+        for (const { mod, res } of heaterResults) {
+          const prev = heaterOk.get(mod);
+          const ok = res.ok && !natsReplyIsError(res.data);
+          heaterOk.set(mod, prev === undefined ? ok : prev || ok);
+        }
+        for (const mod of DRINKX_HOSTS) {
+          const temps = next.complexTemps[mod];
+          const hasTemps = !!temps && Object.keys(temps).length > 0;
+          const natsReach =
+            pumpOk.get(mod) === true ||
+            heaterOk.get(mod) === true ||
+            hasTemps;
+          const natsFail =
+            pumpOk.get(mod) === false &&
+            heaterOk.get(mod) !== true &&
+            !hasTemps;
+          const prev = hostHealth[mod];
+          const natsOk: boolean | null = natsReach
+            ? true
+            : natsFail
+              ? false
+              : (prev?.natsOk ?? null);
+          hostHealth[mod] = {
+            natsOk,
+            dxOk: prev?.dxOk ?? null,
+            updatedAt: at,
+          };
+        }
+        next = { ...next, hostHealth };
       }
 
       if (this.natsAborted(gen)) {
@@ -433,7 +503,7 @@ export class LabTelemetryController {
     try {
       const dx = await window.desktop.dxUiPumpCurrents({
         mode: this.deps.getSessionMode() ?? null,
-        timeoutMs: 2_500,
+        timeoutMs: 3_500,
       });
       if (this.dxAborted(gen)) return;
       const at = Date.now();
@@ -525,18 +595,36 @@ export class LabTelemetryController {
       };
       heaterPwm[host] = {
         ...natsBuilt.heaterPwm[host],
-        heater1: preferActuator(
-          natsBuilt.heaterPwm[host]?.heater1,
-          live.heaterPwm[host]?.heater1,
-          (v) => v > 0,
-          (v) => v === 0
-        ),
-        heater2: preferActuator(
-          natsBuilt.heaterPwm[host]?.heater2,
-          live.heaterPwm[host]?.heater2,
-          (v) => v > 0,
-          (v) => v === 0
-        ),
+        heater1: (() => {
+          const livePwm = live.heaterPwm[host]?.heater1;
+          if (
+            livePwm?.source === "dx" &&
+            now - livePwm.updatedAt < 3_500
+          ) {
+            return livePwm;
+          }
+          return preferActuator(
+            natsBuilt.heaterPwm[host]?.heater1,
+            livePwm,
+            (v) => v > 0,
+            (v) => v === 0
+          );
+        })(),
+        heater2: (() => {
+          const livePwm = live.heaterPwm[host]?.heater2;
+          if (
+            livePwm?.source === "dx" &&
+            now - livePwm.updatedAt < 3_500
+          ) {
+            return livePwm;
+          }
+          return preferActuator(
+            natsBuilt.heaterPwm[host]?.heater2,
+            livePwm,
+            (v) => v > 0,
+            (v) => v === 0
+          );
+        })(),
       };
     }
 
@@ -546,10 +634,41 @@ export class LabTelemetryController {
       pumpRis: live.pumpRis,
       pumpLis: live.pumpLis,
       dxUiStatus: live.dxUiStatus || natsBuilt.dxUiStatus,
+      hostHealth: (() => {
+        const merged: LabSnapshot["hostHealth"] = {
+          ...natsBuilt.hostHealth,
+        };
+        for (const mod of DRINKX_HOSTS) {
+          const built = natsBuilt.hostHealth[mod];
+          const liveH = live.hostHealth[mod];
+          if (!built && !liveH) continue;
+          merged[mod] = {
+            natsOk: built?.natsOk ?? liveH?.natsOk ?? null,
+            dxOk: liveH?.dxOk ?? built?.dxOk ?? null,
+            updatedAt: Math.max(
+              built?.updatedAt ?? 0,
+              liveH?.updatedAt ?? 0
+            ),
+          };
+        }
+        return merged;
+      })(),
       pumpPower,
       pumpOn,
       heaters,
       heaterPwm,
+      milkSystemOpen: (() => {
+        const liveMs = live.milkSystemOpen;
+        const builtMs = natsBuilt.milkSystemOpen;
+        if (now < this.milkSystemHoldUntil && liveMs) return liveMs;
+        if (
+          liveMs?.source === "cmd" &&
+          now - liveMs.updatedAt < CMD_GRACE_MS
+        ) {
+          return liveMs;
+        }
+        return prefer(builtMs ?? undefined, liveMs ?? undefined) ?? null;
+      })(),
     };
   }
 
@@ -564,6 +683,8 @@ export class LabTelemetryController {
     };
     let waterPressure = snap.waterPressure;
     let waterPulses = snap.waterPulses;
+    const openLists: number[][] = [];
+    let valveFieldSeen = false;
 
     for (const host of ["milk", "coffee", "water"] as DrinkxHost[]) {
       const h = tuple.hosts[host];
@@ -575,6 +696,31 @@ export class LabTelemetryController {
         }
         if (h.waterPulses != null) {
           waterPulses = timed(h.waterPulses, "nats", at);
+        }
+      }
+    }
+
+    for (const raw of replies) {
+      const open = extractOpenValveNumbers(raw);
+      if (open !== null) {
+        valveFieldSeen = true;
+        openLists.push(open);
+      }
+      // Facade: milkValves + coffeeValves могут быть оба в одном payload
+      if (raw && typeof raw === "object") {
+        const r = raw as Record<string, unknown>;
+        const result =
+          r.result && typeof r.result === "object"
+            ? (r.result as Record<string, unknown>)
+            : r;
+        for (const key of ["milkValves", "coffeeValves", "waterValves"] as const) {
+          const v = result[key];
+          if (Array.isArray(v)) {
+            valveFieldSeen = true;
+            openLists.push(
+              v.map((x) => Number(x)).filter((n) => Number.isFinite(n))
+            );
+          }
         }
       }
     }
@@ -595,12 +741,22 @@ export class LabTelemetryController {
       }
     }
 
+    // DrinkX getStatus часто без valves → не трогаем. Явный [] = все закрыты.
+    // После bus/cmd — hold, иначе status залипает на устаревшем списке.
+    let milkSystemOpen = snap.milkSystemOpen;
+    if (Date.now() < this.milkSystemHoldUntil) {
+      // keep bus/cmd
+    } else if (valveFieldSeen) {
+      milkSystemOpen = timed(mergeOpenValveNumbers(...openLists), "nats", at);
+    }
+
     return {
       ...snap,
       complexTemps,
       tempsUpdatedAt: at,
       waterPressure,
       waterPulses,
+      milkSystemOpen,
     };
   }
 
@@ -692,6 +848,13 @@ export class LabTelemetryController {
         Date.now() - prevPwm.updatedAt < 4_000
       ) {
         heaterPwm[host] = { ...heaterPwm[host], [hid]: prevPwm };
+      } else if (
+        // Live DX PID важнее оценки PidClassic.start (та часто залипает на 25%)
+        prevPwm?.source === "dx" &&
+        Date.now() - prevPwm.updatedAt < 3_500 &&
+        enabledForPwm === true
+      ) {
+        heaterPwm[host] = { ...heaterPwm[host], [hid]: prevPwm };
       } else {
         heaterPwm[host] = {
           ...heaterPwm[host],
@@ -710,12 +873,24 @@ export class LabTelemetryController {
       milk: {
         pump_R_IS: number | null;
         pump_L_IS: number | null;
+        heater1_pwm?: number | null;
+        heater2_pwm?: number | null;
         error?: string;
         via?: string;
       };
       coffee: {
         pump_R_IS: number | null;
         pump_L_IS: number | null;
+        heater1_pwm?: number | null;
+        heater2_pwm?: number | null;
+        error?: string;
+        via?: string;
+      };
+      water?: {
+        pump_R_IS: number | null;
+        pump_L_IS: number | null;
+        heater1_pwm?: number | null;
+        heater2_pwm?: number | null;
         error?: string;
         via?: string;
       };
@@ -724,34 +899,67 @@ export class LabTelemetryController {
   ): LabSnapshot {
     const pumpRis = { ...snap.pumpRis };
     const pumpLis = { ...snap.pumpLis };
+    const heaterPwm = { ...snap.heaterPwm };
 
-    for (const mod of ["milk", "coffee"] as const) {
+    for (const mod of ["milk", "coffee", "water"] as const) {
       const s = dx[mod];
       if (!s) continue;
       if (s.pump_R_IS != null) pumpRis[mod] = timed(s.pump_R_IS, "dx", at);
       if (s.pump_L_IS != null) pumpLis[mod] = timed(s.pump_L_IS, "dx", at);
+
+      if (mod === "water") continue;
+      const h = snap.heaters[mod];
+      const nextHost = { ...heaterPwm[mod] };
+      if (h?.heater1?.value === true && s.heater1_pwm != null) {
+        nextHost.heater1 = timed(s.heater1_pwm, "dx", at);
+      }
+      if (h?.heater2?.value === true && s.heater2_pwm != null) {
+        nextHost.heater2 = timed(s.heater2_pwm, "dx", at);
+      }
+      heaterPwm[mod] = nextHost;
     }
 
-    const via = (m: "milk" | "coffee") =>
-      dx[m]?.via ? `/${dx[m].via}` : "";
+    const via = (m: "milk" | "coffee" | "water") =>
+      dx[m]?.via ? `/${dx[m]!.via}` : "";
     const errs = [
       dx.milk?.error ? `milk: ${dx.milk.error}` : null,
       dx.coffee?.error ? `coffee: ${dx.coffee.error}` : null,
+      dx.water?.error ? `water: ${dx.water.error}` : null,
     ].filter(Boolean);
     const has =
-      dx.milk?.pump_R_IS != null || dx.coffee?.pump_R_IS != null;
+      dx.milk?.pump_R_IS != null ||
+      dx.coffee?.pump_R_IS != null ||
+      dx.water?.pump_R_IS != null;
     const dxUiStatus = has
-      ? `DX UI ток · milk R=${dx.milk?.pump_R_IS?.toFixed(3) ?? "—"} L=${dx.milk?.pump_L_IS?.toFixed(3) ?? "—"}${via("milk")} · coffee R=${dx.coffee?.pump_R_IS?.toFixed(3) ?? "—"} L=${dx.coffee?.pump_L_IS?.toFixed(3) ?? "—"}${via("coffee")}`
+      ? `DX UI ток · milk R=${dx.milk?.pump_R_IS?.toFixed(3) ?? "—"} L=${dx.milk?.pump_L_IS?.toFixed(3) ?? "—"}${via("milk")} · coffee R=${dx.coffee?.pump_R_IS?.toFixed(3) ?? "—"} L=${dx.coffee?.pump_L_IS?.toFixed(3) ?? "—"}${via("coffee")} · water R=${dx.water?.pump_R_IS?.toFixed(3) ?? "—"}${via("water")}`
       : errs.length
-        ? `DX UI пусто: ${errs.join("; ")} · эталон milk=.44 coffee=.45`
-        : "DX UI: нет pump_R_IS · проверьте IP milk=.44 coffee=.45";
+        ? `DX UI пусто: ${errs.join("; ")} · эталон milk=.44 coffee=.45 water=.46 (не .33)`
+        : "DX UI: нет pump_R_IS · проверьте IP milk=.44 coffee=.45 water=.46 (не .33)";
+
+    const hostHealth: LabSnapshot["hostHealth"] = { ...snap.hostHealth };
+    for (const mod of ["milk", "coffee", "water"] as const) {
+      const s = dx[mod];
+      const prev = hostHealth[mod];
+      let dxOk: boolean | null = prev?.dxOk ?? null;
+      if (s?.pump_R_IS != null || s?.pump_L_IS != null) {
+        dxOk = true;
+      } else if (s?.error) {
+        dxOk = false;
+      }
+      hostHealth[mod] = {
+        natsOk: prev?.natsOk ?? null,
+        dxOk,
+        updatedAt: at,
+      };
+    }
 
     return {
       ...snap,
       pumpRis,
       pumpLis,
+      heaterPwm,
+      hostHealth,
       dxUiStatus,
-      // DX success also refreshes "alive" for stale UI
       lastTickAt: has ? Math.max(snap.lastTickAt, at) : snap.lastTickAt,
     };
   }

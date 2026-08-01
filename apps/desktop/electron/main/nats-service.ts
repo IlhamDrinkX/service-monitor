@@ -18,6 +18,8 @@ const DEFAULT_TIMEOUT = 5_000;
 let nc: NatsConnection | null = null;
 let statusSub: Subscription | null = null;
 let busSubs: Subscription[] = [];
+/** clientId → subjects (Lab + ComplexOS не затирают друг друга). */
+const busClients = new Map<string, string[]>();
 let currentServer: string | null = null;
 
 function decode(data: Uint8Array): unknown {
@@ -61,6 +63,7 @@ export async function natsDisconnect(): Promise<NatsConnectionInfo> {
   }
   statusSub = null;
   clearBusSubs();
+  busClients.clear();
   if (nc) {
     try {
       await nc.drain();
@@ -376,18 +379,51 @@ function clearBusSubs() {
 }
 
 /**
- * Подписка на произвольные subjects (ComplexOS bus alerts и т.п.).
+ * Подписка на bus subjects. Несколько клиентов (lab / complexos) мержатся.
  * Сообщения → renderer channel `nats:bus` { subject, data }.
  */
 export async function natsSubscribeBus(
-  subjects: string[]
+  subjects: string[],
+  clientId = "default"
 ): Promise<{ ok: true; subjects: string[] }> {
-  const conn = await ensure();
-  clearBusSubs();
   const unique = [...new Set(subjects.map((s) => s.trim()).filter(Boolean))];
-  console.log("[nats] subscribeBus", unique);
-  for (const subject of unique) {
-    const sub = conn.subscribe(subject, {
+  busClients.set(clientId || "default", unique);
+  const merged = rebuildBusSubjectList();
+  await ensure();
+  await resubscribeBus(merged);
+  console.log("[nats] subscribeBus", clientId, unique, "→", merged);
+  return { ok: true, subjects: merged };
+}
+
+export async function natsUnsubscribeBus(
+  clientId = "default"
+): Promise<{ ok: true }> {
+  busClients.delete(clientId || "default");
+  const merged = rebuildBusSubjectList();
+  console.log("[nats] unsubscribeBus", clientId, "→", merged);
+  if (merged.length === 0) {
+    clearBusSubs();
+  } else if (nc) {
+    await resubscribeBus(merged);
+  } else {
+    clearBusSubs();
+  }
+  return { ok: true };
+}
+
+function rebuildBusSubjectList(): string[] {
+  const all = new Set<string>();
+  for (const list of busClients.values()) {
+    for (const s of list) all.add(s);
+  }
+  return [...all];
+}
+
+async function resubscribeBus(subjects: string[]): Promise<void> {
+  clearBusSubs();
+  if (!nc || subjects.length === 0) return;
+  for (const subject of subjects) {
+    const sub = nc.subscribe(subject, {
       callback: (err, msg) => {
         if (err) {
           console.warn("[nats] bus sub", subject, err);
@@ -403,13 +439,6 @@ export async function natsSubscribeBus(
     });
     busSubs.push(sub);
   }
-  return { ok: true, subjects: unique };
-}
-
-export async function natsUnsubscribeBus(): Promise<{ ok: true }> {
-  console.log("[nats] unsubscribeBus", busSubs.length);
-  clearBusSubs();
-  return { ok: true };
 }
 
 export async function natsUpdateConfig(

@@ -1,0 +1,1578 @@
+/**
+ * Полный UI графика комплекса (отдельное окно / enlarge).
+ * Срез маркера — скрываемый; импорт/экспорт полного лога событий.
+ */
+
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type MouseEvent as ReactMouseEvent,
+  type SetStateAction,
+} from "react";
+import {
+  DRINKX_HOSTS,
+  HEATER_LABELS,
+  VALVE_LABELS,
+  booleanStepSeries,
+  chartSeriesMeta,
+  chartSinceMs,
+  parseSeriesKey,
+  pumpPowerSeries,
+  sensorSeries,
+  seriesKey,
+  snapshotAt,
+  type ChartTimeScale,
+  type DrinkxHost,
+  type LabEvent,
+  type LabSnapshotRow,
+} from "@service-monitor/core";
+
+const SERIES_COLORS = [
+  "#3db8a8",
+  "#e8a838",
+  "#6ea8fe",
+  "#e87a9a",
+  "#a78bfa",
+  "#84cc16",
+  "#f97316",
+  "#22d3ee",
+];
+
+const ACTUATOR_COLORS = [
+  "#94a3b8",
+  "#64748b",
+  "#cbd5e1",
+  "#78716c",
+  "#a8a29e",
+  "#71717a",
+  "#52525b",
+  "#eab308",
+];
+
+type YScale = "auto" | "norm" | "stack" | "0-5" | "0-100" | "0-120";
+
+export type LabChartSyncPayload = {
+  events: LabEvent[];
+  allSensors: string[];
+  initialSensor: string | null;
+  valvesMap: Record<DrinkxHost, string[]>;
+  heaterIds: string[];
+  liveActuators?: {
+    valves: Record<string, boolean>;
+    pumps: Partial<Record<DrinkxHost, boolean>>;
+  };
+};
+
+/** Пустой снимок для окна графика без сессии / до импорта лога. */
+export const EMPTY_LAB_CHART_PAYLOAD: LabChartSyncPayload = {
+  events: [],
+  allSensors: [],
+  initialSensor: null,
+  valvesMap: { milk: [], coffee: [], water: [] },
+  heaterIds: [],
+};
+
+const LOG_KIND = "service-monitor-lab-chart";
+const LOG_VERSION = 1;
+
+function heaterPwmKey(mod: DrinkxHost, hid: string): string {
+  return seriesKey(mod, `${hid}_pwm`);
+}
+
+function formatSliceValue(value: string | number | boolean | null): string {
+  if (value === true) return "ON";
+  if (value === false) return "OFF";
+  if (value == null) return "—";
+  return String(value);
+}
+
+/** Подпись полосы: модуль не выкидываем (milk·насос). */
+function laneLabel(label: string): string {
+  const short = label
+    .replace(/ · Насос ON\/OFF$/i, "·насос")
+    .replace(/^milk · /i, "milk·")
+    .replace(/^coffee · /i, "coffee·")
+    .replace(/^water · /i, "water·");
+  return short.length > 30 ? `${short.slice(0, 28)}…` : short;
+}
+
+function compactSeriesLabel(label: string, code: string): string {
+  const short = label
+    .replace(/^milk · /i, "m·")
+    .replace(/^coffee · /i, "c·")
+    .replace(/^water · /i, "w·");
+  if (short.length <= 22) return short;
+  return code.length <= 22 ? code : `${code.slice(0, 20)}…`;
+}
+
+function rowModule(row: LabSnapshotRow): DrinkxHost | "other" {
+  if (row.module === "milk" || row.module === "coffee" || row.module === "water") {
+    return row.module;
+  }
+  return "other";
+}
+
+function moveKey(order: string[], key: string, dir: -1 | 1): string[] {
+  const i = order.indexOf(key);
+  if (i < 0) return order;
+  const j = i + dir;
+  if (j < 0 || j >= order.length) return order;
+  const next = [...order];
+  const tmp = next[i]!;
+  next[i] = next[j]!;
+  next[j] = tmp;
+  return next;
+}
+
+/**
+ * Достраиваем ступеньки до now по истории событий.
+ * Live-снимок не вставляем поверх истории — иначе справа появляется
+ * «залипший» короткий ON, не совпадающий с цветом ряда под курсором.
+ */
+function finalizeActuatorPoints(
+  points: Array<{ t: number; v: number }>,
+  live: boolean | undefined,
+  viewStart: number | null,
+  now: number
+): Array<{ t: number; v: number }> {
+  if (points.length === 0) {
+    if (live == null) return [];
+    const v = live ? 1 : 0;
+    const t0 = viewStart != null ? viewStart : Math.max(0, now - 1_000);
+    return [
+      { t: t0, v },
+      { t: now, v },
+    ];
+  }
+  const out = points.map((p) => ({ ...p }));
+  const last = out[out.length - 1]!;
+  if (last.t < now) {
+    out.push({ t: now, v: last.v });
+  }
+  return out;
+}
+
+function isLabChartLog(raw: unknown): raw is {
+  kind: string;
+  version: number;
+  events: LabEvent[];
+  allSensors?: string[];
+  valvesMap?: Record<DrinkxHost, string[]>;
+  heaterIds?: string[];
+  selected?: string[];
+  overlays?: {
+    valves?: string[];
+    pumpOn?: DrinkxHost[];
+    pumpPower?: DrinkxHost[];
+    heaterPwm?: string[];
+  };
+  timeScale?: ChartTimeScale;
+  yScale?: YScale;
+  markerAt?: string | null;
+  sliceOrder?: Partial<Record<DrinkxHost, string[]>>;
+} {
+  if (!raw || typeof raw !== "object") return false;
+  const o = raw as Record<string, unknown>;
+  return (
+    o.kind === LOG_KIND &&
+    typeof o.version === "number" &&
+    Array.isArray(o.events)
+  );
+}
+
+type ContinuousSeries = {
+  id: string;
+  label: string;
+  code: string;
+  unit: string;
+  color: string;
+  points: Array<{ t: number; v: number }>;
+};
+
+type ActuatorSeries = {
+  id: string;
+  label: string;
+  color: string;
+  points: Array<{ t: number; v: number }>;
+};
+
+export function LabChartPanel({
+  events,
+  allSensors,
+  initialSensor,
+  valvesMap,
+  heaterIds,
+  liveActuators,
+  windowMode = false,
+}: LabChartSyncPayload & { windowMode?: boolean }) {
+  const [replay, setReplay] = useState<LabChartSyncPayload | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(
+    () => new Set(initialSensor ? [initialSensor] : [])
+  );
+  const [timeScale, setTimeScale] = useState<ChartTimeScale>("5m");
+  const [yScale, setYScale] = useState<YScale>("auto");
+  /** Сдвиг назад от «живого» края (мс). 0 = следим за сейчас. */
+  const [panOffsetMs, setPanOffsetMs] = useState(0);
+  const [showPumpOn, setShowPumpOn] = useState<Set<DrinkxHost>>(() => new Set());
+  const [showPumpPower, setShowPumpPower] = useState<Set<DrinkxHost>>(() => new Set());
+  const [valvesOn, setValvesOn] = useState<Set<string>>(() => new Set());
+  const [heaterPwmOn, setHeaterPwmOn] = useState<Set<string>>(() => new Set());
+  const [markerT, setMarkerT] = useState<number | null>(null);
+  const [overlaysOpen, setOverlaysOpen] = useState(false);
+  const [sliceOpen, setSliceOpen] = useState(true);
+  const [sliceOrder, setSliceOrder] = useState<Record<DrinkxHost, string[]>>(
+    () => ({ milk: [], coffee: [], water: [] })
+  );
+  const importRef = useRef<HTMLInputElement>(null);
+
+  const effectiveEvents = replay?.events ?? events;
+  const effectiveSensors = replay?.allSensors ?? allSensors;
+  const effectiveValvesMap = replay?.valvesMap ?? valvesMap;
+  const effectiveHeaterIds = replay?.heaterIds ?? heaterIds;
+  const effectiveLiveActuators = replay ? undefined : liveActuators;
+  const replayNow = useMemo(() => {
+    if (!replay) return null;
+    const times = replay.events
+      .map((event) => Date.parse(event.at))
+      .filter(Number.isFinite);
+    return times.length > 0 ? Math.max(...times) : null;
+  }, [replay]);
+  const clockNow = replayNow ?? Date.now();
+
+  const dataSpan = useMemo(() => {
+    let minT = Number.POSITIVE_INFINITY;
+    let maxT = Number.NEGATIVE_INFINITY;
+    for (const event of effectiveEvents) {
+      const t = Date.parse(event.at);
+      if (!Number.isFinite(t)) continue;
+      if (t < minT) minT = t;
+      if (t > maxT) maxT = t;
+    }
+    if (!Number.isFinite(minT)) {
+      return { minT: clockNow - 60_000, maxT: clockNow };
+    }
+    return { minT, maxT: Math.max(maxT, clockNow) };
+  }, [effectiveEvents, clockNow]);
+
+  const windowMs = useMemo(() => {
+    if (timeScale === "all") return null;
+    const map: Record<Exclude<ChartTimeScale, "all">, number> = {
+      "1m": 60_000,
+      "5m": 300_000,
+      "15m": 900_000,
+    };
+    return map[timeScale];
+  }, [timeScale]);
+
+  /**
+   * Сколько можно сдвинуть окно назад: правый край уходит от «сейчас»
+   * до тех пор, пока левый край не совпадёт с самым ранним событием сессии.
+   * Для «всё» панорамирование не нужно — ось = весь span.
+   */
+  const maxPanMs = useMemo(() => {
+    if (windowMs == null) return 0;
+    return Math.max(0, clockNow - dataSpan.minT - windowMs);
+  }, [clockNow, dataSpan.minT, windowMs]);
+
+  const panClamped = Math.min(Math.max(0, panOffsetMs), maxPanMs);
+  const viewEnd = clockNow - panClamped;
+  /** Фиксированные шкалы: ровно 1m/5m/15m, даже если слева ещё нет точек. */
+  const viewStart =
+    windowMs == null ? dataSpan.minT : viewEnd - windowMs;
+  const since = windowMs == null ? dataSpan.minT : viewStart;
+  /** ~1 Гц × 15 мин + запас; «всё» — не режем ниже объёма буфера. */
+  const limit =
+    timeScale === "all" || windowMs == null
+      ? Math.max(20_000, effectiveEvents.length)
+      : Math.max(2_000, Math.ceil((windowMs / 1000) * 2) + 100);
+
+  useEffect(() => {
+    if (panOffsetMs > maxPanMs) setPanOffsetMs(maxPanMs);
+  }, [maxPanMs, panOffsetMs]);
+
+  useEffect(() => {
+    if (!initialSensor || replay) return;
+    setSelected((prev) => {
+      if (prev.has(initialSensor)) return prev;
+      return new Set(prev).add(initialSensor);
+    });
+  }, [initialSensor, replay]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "F11" && windowMode) {
+        e.preventDefault();
+        void window.desktop.labChartToggleFullScreen?.();
+        return;
+      }
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+      e.preventDefault();
+      const start = chartSinceMs(timeScale, clockNow);
+      const span =
+        timeScale === "all"
+          ? 60_000
+          : Math.max(1_000, (clockNow - (start ?? clockNow - 60_000)) * 0.02);
+      const step = e.shiftKey ? span * 5 : span;
+      setMarkerT((prev) => {
+        const base = prev ?? clockNow;
+        return e.key === "ArrowLeft" ? base - step : base + step;
+      });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [clockNow, timeScale, windowMode]);
+
+  const continuous = useMemo(() => {
+    const series: ContinuousSeries[] = [];
+    let ci = 0;
+    const pushSeries = (id: string) => {
+      if (series.some((item) => item.id === id)) return;
+      const meta = chartSeriesMeta(id);
+      const { module, name: local } = parseSeriesKey(id);
+      let points = sensorSeries(
+        effectiveEvents,
+        id,
+        limit,
+        since,
+        viewEnd
+      );
+      if (local === "pumpPower" && points.length < 2 && module) {
+        const fromPump = pumpPowerSeries(
+          effectiveEvents,
+          since,
+          limit,
+          module,
+          viewEnd
+        );
+        if (fromPump.length > points.length) points = fromPump;
+      }
+      series.push({
+        id,
+        label: meta.label,
+        code: meta.code,
+        unit: meta.unit,
+        color: SERIES_COLORS[ci % SERIES_COLORS.length]!,
+        points,
+      });
+      ci += 1;
+    };
+    for (const name of effectiveSensors) {
+      if (selected.has(name)) pushSeries(name);
+    }
+    for (const mod of DRINKX_HOSTS) {
+      if (showPumpPower.has(mod)) pushSeries(seriesKey(mod, "pumpPower"));
+      for (const hid of effectiveHeaterIds) {
+        const id = heaterPwmKey(mod, hid);
+        if (heaterPwmOn.has(id)) pushSeries(id);
+      }
+    }
+    return series;
+  }, [
+    effectiveEvents,
+    effectiveHeaterIds,
+    effectiveSensors,
+    heaterPwmOn,
+    limit,
+    selected,
+    showPumpPower,
+    since,
+    viewEnd,
+  ]);
+
+  const actuators = useMemo(() => {
+    const list: ActuatorSeries[] = [];
+    let ai = 0;
+    for (const mod of DRINKX_HOSTS) {
+      for (const id of effectiveValvesMap[mod] ?? []) {
+        const key = seriesKey(mod, id);
+        if (!valvesOn.has(key)) continue;
+        const raw = booleanStepSeries(
+          effectiveEvents,
+          "valve",
+          key,
+          since,
+          limit,
+          viewEnd
+        );
+        list.push({
+          id: `valve:${key}`,
+          label: `${mod} · ${VALVE_LABELS[id] ?? id}`,
+          color: ACTUATOR_COLORS[ai++ % ACTUATOR_COLORS.length]!,
+          points: finalizeActuatorPoints(
+            raw,
+            effectiveLiveActuators?.valves[key],
+            viewStart,
+            viewEnd
+          ),
+        });
+      }
+      if (showPumpOn.has(mod)) {
+        const key = seriesKey(mod, "pump");
+        const raw = booleanStepSeries(
+          effectiveEvents,
+          "pump",
+          key,
+          since,
+          limit,
+          viewEnd
+        );
+        list.push({
+          id: `pump:${key}`,
+          label: `${mod} · Насос ON/OFF`,
+          color: ACTUATOR_COLORS[ai++ % ACTUATOR_COLORS.length]!,
+          points: finalizeActuatorPoints(
+            raw,
+            effectiveLiveActuators?.pumps[mod],
+            viewStart,
+            viewEnd
+          ),
+        });
+      }
+    }
+    return list;
+  }, [
+    effectiveEvents,
+    effectiveLiveActuators,
+    effectiveValvesMap,
+    limit,
+    showPumpOn,
+    since,
+    valvesOn,
+    viewEnd,
+    viewStart,
+  ]);
+
+  const slice = useMemo(
+    () => (markerT == null ? [] : snapshotAt(effectiveEvents, markerT)),
+    [effectiveEvents, markerT]
+  );
+  const sliceByModule = useMemo(() => {
+    const map: Record<DrinkxHost | "other", LabSnapshotRow[]> = {
+      milk: [],
+      coffee: [],
+      water: [],
+      other: [],
+    };
+    for (const row of slice) map[rowModule(row)].push(row);
+    return map;
+  }, [slice]);
+
+  useEffect(() => {
+    if (markerT == null) return;
+    setSliceOrder((prev) => {
+      const next = { ...prev };
+      for (const mod of DRINKX_HOSTS) {
+        const keys = sliceByModule[mod].map((row) => `${row.kind}:${row.key}`);
+        const kept = prev[mod].filter((key) => keys.includes(key));
+        next[mod] = [...kept, ...keys.filter((key) => !kept.includes(key))];
+      }
+      return next;
+    });
+  }, [markerT, sliceByModule]);
+
+  const sensorsByModule = useMemo(() => {
+    const map: Record<DrinkxHost, string[]> = { milk: [], coffee: [], water: [] };
+    for (const key of effectiveSensors) {
+      const { module } = parseSeriesKey(key);
+      if (module === "milk" || module === "coffee" || module === "water") {
+        map[module].push(key);
+      }
+    }
+    return map;
+  }, [effectiveSensors]);
+
+  function toggleSensor(name: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  }
+
+  function toggleSet(setter: Dispatch<SetStateAction<Set<string>>>, id: string) {
+    setter((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleHostSet(
+    setter: Dispatch<SetStateAction<Set<DrinkxHost>>>,
+    mod: DrinkxHost
+  ) {
+    setter((prev) => {
+      const next = new Set(prev);
+      if (next.has(mod)) next.delete(mod);
+      else next.add(mod);
+      return next;
+    });
+  }
+
+  function exportChartLog() {
+    const t = markerT ?? clockNow;
+    const payload = {
+      kind: LOG_KIND,
+      version: LOG_VERSION,
+      exportedAt: new Date().toISOString(),
+      markerAt: markerT == null ? null : new Date(markerT).toISOString(),
+      timeScale,
+      yScale,
+      events: effectiveEvents,
+      allSensors: effectiveSensors,
+      valvesMap: effectiveValvesMap,
+      heaterIds: effectiveHeaterIds,
+      selected: [...selected],
+      overlays: {
+        valves: [...valvesOn],
+        pumpOn: [...showPumpOn],
+        pumpPower: [...showPumpPower],
+        heaterPwm: [...heaterPwmOn],
+      },
+      sliceOrder,
+      snapshot: snapshotAt(effectiveEvents, t),
+    };
+    const url = URL.createObjectURL(
+      new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" })
+    );
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `complex-chart-${new Date(t)
+      .toISOString()
+      .replace(/[:.]/g, "-")}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function importChartLog(file: File) {
+    try {
+      const raw: unknown = JSON.parse(await file.text());
+      if (!isLabChartLog(raw) || raw.version !== LOG_VERSION) {
+        throw new Error("Неподдерживаемый формат лога");
+      }
+      const importedSensors = raw.allSensors ?? allSensors;
+      const payload: LabChartSyncPayload = {
+        events: raw.events,
+        allSensors: importedSensors,
+        initialSensor: null,
+        valvesMap: raw.valvesMap ?? valvesMap,
+        heaterIds: raw.heaterIds ?? heaterIds,
+      };
+      setReplay(payload);
+      setSelected(new Set(raw.selected ?? importedSensors.slice(0, 1)));
+      setValvesOn(new Set(raw.overlays?.valves ?? []));
+      setShowPumpOn(new Set(raw.overlays?.pumpOn ?? []));
+      setShowPumpPower(new Set(raw.overlays?.pumpPower ?? []));
+      setHeaterPwmOn(new Set(raw.overlays?.heaterPwm ?? []));
+      if (raw.timeScale) setTimeScale(raw.timeScale);
+      if (raw.yScale) setYScale(raw.yScale);
+      if (raw.sliceOrder) {
+        setSliceOrder({
+          milk: raw.sliceOrder.milk ?? [],
+          coffee: raw.sliceOrder.coffee ?? [],
+          water: raw.sliceOrder.water ?? [],
+        });
+      }
+      const importedMarker = raw.markerAt ? Date.parse(raw.markerAt) : NaN;
+      setMarkerT(Number.isFinite(importedMarker) ? importedMarker : null);
+      setSliceOpen(true);
+    } catch (error) {
+      window.alert(
+        error instanceof Error ? error.message : "Не удалось импортировать лог"
+      );
+    } finally {
+      if (importRef.current) importRef.current.value = "";
+    }
+  }
+
+  function orderedRows(mod: DrinkxHost): LabSnapshotRow[] {
+    const rows = sliceByModule[mod];
+    const byId = new Map(rows.map((row) => [`${row.kind}:${row.key}`, row]));
+    const ordered = sliceOrder[mod]
+      .map((key) => byId.get(key))
+      .filter((row): row is LabSnapshotRow => row != null);
+    for (const row of rows) {
+      if (!sliceOrder[mod].includes(`${row.kind}:${row.key}`)) ordered.push(row);
+    }
+    return ordered;
+  }
+
+  function renderSliceRow(mod: DrinkxHost, row: LabSnapshotRow) {
+    const id = `${row.kind}:${row.key}`;
+    return (
+      <div key={id} className="lab-chart-slice-row">
+        <div className="lab-chart-slice-row-move">
+          {([-1, 1] as const).map((dir) => (
+            <button
+              key={dir}
+              type="button"
+              className="btn btn-compact"
+              aria-label={dir < 0 ? "Выше" : "Ниже"}
+              onClick={() =>
+                setSliceOrder((prev) => ({
+                  ...prev,
+                  [mod]: moveKey(prev[mod], id, dir),
+                }))
+              }
+            >
+              {dir < 0 ? "↑" : "↓"}
+            </button>
+          ))}
+        </div>
+        <div className="lab-chart-slice-row-grid">
+          <span className="lab-chart-slice-k">{row.label}</span>
+          <strong className="lab-chart-slice-v">
+            {formatSliceValue(row.value)}
+            {row.unit ? ` ${row.unit}` : ""}
+          </strong>
+          <code className="lab-chart-meta">{row.code}</code>
+          <span className="lab-chart-meta">
+            {row.at ? new Date(row.at).toLocaleTimeString() : "—"}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`lab-chart-panel${windowMode ? " is-window" : ""}`}>
+      <div className="lab-chart-modal-head">
+        <h2 style={{ margin: 0, fontSize: "1.1rem" }}>
+          График комплекса{replay ? " · просмотр лога" : ""}
+        </h2>
+        <div className="row" style={{ gap: 8 }}>
+          <input
+            ref={importRef}
+            type="file"
+            accept="application/json,.json"
+            hidden
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) void importChartLog(file);
+            }}
+          />
+          <button type="button" className="btn" onClick={() => importRef.current?.click()}>
+            Импорт лога
+          </button>
+          <button type="button" className="btn" onClick={exportChartLog}>
+            Экспорт лога
+          </button>
+          {replay ? (
+            <button type="button" className="btn" onClick={() => setReplay(null)}>
+              {events.length > 0 ? "Живой режим" : "Очистить лог"}
+            </button>
+          ) : null}
+          {windowMode ? (
+            <button
+              type="button"
+              className="btn"
+              onClick={() => void window.desktop.labChartToggleFullScreen?.()}
+              title="F11"
+            >
+              Полный экран
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="lab-chart-modal-toolbar">
+        <label className="muted">
+          время{" "}
+          <select
+            value={timeScale}
+            onChange={(event) => {
+              setTimeScale(event.target.value as ChartTimeScale);
+              setPanOffsetMs(0);
+            }}
+          >
+            <option value="1m">1 мин</option>
+            <option value="5m">5 мин</option>
+            <option value="15m">15 мин</option>
+            <option value="all">всё</option>
+          </select>
+        </label>
+        <label className="muted">
+          шкала Y{" "}
+          <select
+            value={yScale}
+            onChange={(event) => setYScale(event.target.value as YScale)}
+          >
+            <option value="stack">стек (полосы)</option>
+            <option value="norm">норм. % (одна ось)</option>
+            <option value="auto">auto (общая)</option>
+            <option value="0-5">0–5 (bar / A)</option>
+            <option value="0-100">0–100 (%)</option>
+            <option value="0-120">0–120 (°C)</option>
+          </select>
+        </label>
+        {markerT != null ? (
+          <>
+            <button type="button" className="btn" onClick={() => setMarkerT(null)}>
+              Сбросить маркер
+            </button>
+            <button
+              type="button"
+              className="btn btn-compact"
+              onClick={() => setSliceOpen((value) => !value)}
+            >
+              {sliceOpen ? "Скрыть срез" : "Срез"}
+            </button>
+          </>
+        ) : (
+          <span className="muted">
+            Клик — маркер · ← → · Shift быстрее
+            {windowMode ? " · F11 полный экран" : ""}
+          </span>
+        )}
+        <button
+          type="button"
+          className="btn btn-compact"
+          onClick={() => setOverlaysOpen((value) => !value)}
+        >
+          {overlaysOpen ? "Скрыть модули" : "Модули milk/coffee/water"}
+        </button>
+      </div>
+
+      {effectiveEvents.length === 0 ? (
+        <p className="muted" style={{ margin: "0 0 8px" }}>
+          Нет данных — нажмите «Импорт лога» и выберите JSON (Экспорт лога /
+          service-monitor-lab-chart), либо дождитесь опроса комплекса.
+        </p>
+      ) : null}
+
+      {overlaysOpen ? (
+        <div className="lab-chart-overlays">
+          {DRINKX_HOSTS.map((mod) => (
+            <div key={mod} className="lab-chart-overlay-mod">
+              <div className="lab-chart-overlay-title">{mod}</div>
+              <div className="lab-chart-overlay-body">
+                <div className="row" style={{ gap: 6, marginBottom: 6 }}>
+                  <button
+                    type="button"
+                    className="btn btn-compact"
+                    onClick={() => {
+                      setValvesOn((prev) => {
+                        const next = new Set(prev);
+                        for (const id of effectiveValvesMap[mod] ?? []) {
+                          next.add(seriesKey(mod, id));
+                        }
+                        return next;
+                      });
+                      setShowPumpOn((prev) => new Set(prev).add(mod));
+                      setShowPumpPower((prev) => new Set(prev).add(mod));
+                      setHeaterPwmOn((prev) => {
+                        const next = new Set(prev);
+                        for (const id of effectiveHeaterIds) {
+                          next.add(heaterPwmKey(mod, id));
+                        }
+                        return next;
+                      });
+                      setSelected((prev) => {
+                        const next = new Set(prev);
+                        for (const name of sensorsByModule[mod]) next.add(name);
+                        return next;
+                      });
+                      setYScale("stack");
+                    }}
+                  >
+                    все
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-compact"
+                    onClick={() => {
+                      setValvesOn((prev) => {
+                        const next = new Set(prev);
+                        for (const id of effectiveValvesMap[mod] ?? []) {
+                          next.delete(seriesKey(mod, id));
+                        }
+                        return next;
+                      });
+                      setShowPumpOn((prev) => {
+                        const next = new Set(prev);
+                        next.delete(mod);
+                        return next;
+                      });
+                      setShowPumpPower((prev) => {
+                        const next = new Set(prev);
+                        next.delete(mod);
+                        return next;
+                      });
+                      setHeaterPwmOn((prev) => {
+                        const next = new Set(prev);
+                        for (const id of effectiveHeaterIds) {
+                          next.delete(heaterPwmKey(mod, id));
+                        }
+                        return next;
+                      });
+                      setSelected((prev) => {
+                        const next = new Set(prev);
+                        for (const name of sensorsByModule[mod]) next.delete(name);
+                        return next;
+                      });
+                    }}
+                  >
+                    сброс
+                  </button>
+                </div>
+                <div className="lab-chart-side-title">Датчики</div>
+                {sensorsByModule[mod].map((name) => {
+                  const meta = chartSeriesMeta(name);
+                  return (
+                    <label key={name} className="lab-chart-check">
+                      <input
+                        type="checkbox"
+                        checked={selected.has(name)}
+                        onChange={() => toggleSensor(name)}
+                      />
+                      <span>
+                        {meta.label.replace(`${mod} · `, "")}
+                        <span className="lab-chart-meta">{meta.code}</span>
+                      </span>
+                    </label>
+                  );
+                })}
+                <div className="lab-chart-side-title" style={{ marginTop: 8 }}>
+                  Исполнители
+                </div>
+                {(effectiveValvesMap[mod] ?? []).map((id) => {
+                  const key = seriesKey(mod, id);
+                  return (
+                    <label key={key} className="lab-chart-check">
+                      <input
+                        type="checkbox"
+                        checked={valvesOn.has(key)}
+                        onChange={() => toggleSet(setValvesOn, key)}
+                      />
+                      <span>
+                        {VALVE_LABELS[id] ?? id}
+                        <span className="lab-chart-meta">{key}</span>
+                      </span>
+                    </label>
+                  );
+                })}
+                <label className="lab-chart-check">
+                  <input
+                    type="checkbox"
+                    checked={showPumpOn.has(mod)}
+                    onChange={() => toggleHostSet(setShowPumpOn, mod)}
+                  />
+                  <span>
+                    Насос ON/OFF
+                    <span className="lab-chart-meta">{mod}</span>
+                  </span>
+                </label>
+                <label className="lab-chart-check">
+                  <input
+                    type="checkbox"
+                    checked={showPumpPower.has(mod)}
+                    onChange={() => toggleHostSet(setShowPumpPower, mod)}
+                  />
+                  <span>Мощность насоса %</span>
+                </label>
+                {effectiveHeaterIds.map((id) => {
+                  const key = heaterPwmKey(mod, id);
+                  return (
+                    <label key={key} className="lab-chart-check">
+                      <input
+                        type="checkbox"
+                        checked={heaterPwmOn.has(key)}
+                        onChange={() => toggleSet(setHeaterPwmOn, key)}
+                      />
+                      <span>
+                        {HEATER_LABELS[id] ?? id} ШИМ
+                        <span className="lab-chart-meta">{key}</span>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="lab-chart-main">
+        <div className="lab-chart-plot-scroll">
+          <MultiChart
+            continuous={continuous}
+            actuators={actuators}
+            yScale={yScale}
+            viewStart={viewStart}
+            viewEnd={viewEnd}
+            markerT={markerT}
+            onMark={setMarkerT}
+          />
+        </div>
+        {maxPanMs > 0 ? (
+          <div className="lab-chart-time-scroll">
+            <span className="muted" style={{ fontSize: "0.75rem", flex: "0 0 auto" }}>
+              история
+            </span>
+            <input
+              type="range"
+              className="lab-chart-time-range"
+              min={0}
+              max={maxPanMs}
+              step={Math.max(500, Math.floor(maxPanMs / 400))}
+              value={maxPanMs - panClamped}
+              title="Горизонтальная прокрутка по времени"
+              onChange={(event) => {
+                const v = Number(event.target.value);
+                setPanOffsetMs(maxPanMs - v);
+              }}
+            />
+            <span className="muted" style={{ fontSize: "0.75rem", flex: "0 0 auto" }}>
+              сейчас
+            </span>
+            <button
+              type="button"
+              className="btn btn-compact"
+              disabled={panClamped === 0}
+              onClick={() => setPanOffsetMs(0)}
+            >
+              к живому
+            </button>
+            <span className="muted" style={{ fontSize: "0.72rem" }}>
+              {new Date(viewStart).toLocaleTimeString()} –{" "}
+              {new Date(viewEnd).toLocaleTimeString()}
+            </span>
+          </div>
+        ) : null}
+        <div className="lab-chart-legend">
+          {continuous.map((series) => (
+            <button
+              key={series.id}
+              type="button"
+              className="lab-chart-legend-chip"
+              title={`${series.label}${series.unit ? ` (${series.unit})` : ""} · ${series.code}`}
+              onClick={() => {
+                const { name, module } = parseSeriesKey(series.id);
+                if (name === "pumpPower" && module && DRINKX_HOSTS.includes(module as DrinkxHost)) {
+                  toggleHostSet(setShowPumpPower, module as DrinkxHost);
+                } else if (name.endsWith("_pwm")) {
+                  toggleSet(setHeaterPwmOn, series.id);
+                } else {
+                  toggleSensor(series.id);
+                }
+              }}
+            >
+              <i style={{ background: series.color }} />
+              {compactSeriesLabel(series.label, series.code)}
+            </button>
+          ))}
+          {actuators.map((series) => (
+            <span
+              key={series.id}
+              className="lab-chart-legend-chip is-actuator"
+              title={series.label}
+            >
+              <i style={{ background: series.color }} />
+              {laneLabel(series.label)}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {markerT != null && sliceOpen ? (
+        <div className="lab-chart-slice-board">
+          <div className="lab-chart-slice-board-head">
+            <h3 style={{ margin: 0, fontSize: "0.95rem" }}>
+              Срез · {new Date(markerT).toLocaleTimeString()}
+            </h3>
+            <span className="muted" style={{ fontSize: "0.8rem" }}>
+              ↑↓ меняют порядок · клик не трогает график
+            </span>
+          </div>
+          <div className="lab-chart-slice-scroll">
+            <div className="lab-chart-slice-grid">
+              {(() => {
+                const milk = orderedRows("milk");
+                const mid = Math.ceil(milk.length / 2);
+                const columns: Array<[string, DrinkxHost, LabSnapshotRow[]]> = [
+                  ["milk", "milk", milk.slice(0, mid)],
+                  ["milk", "milk", milk.slice(mid)],
+                  ["coffee", "coffee", orderedRows("coffee")],
+                  ["water", "water", orderedRows("water")],
+                ];
+                return columns.map(([title, mod, rows], index) => (
+                  <div key={`${title}-${index}`} className="lab-chart-slice-col">
+                    <div className="lab-chart-side-title">{title}</div>
+                    {rows.length > 0 ? (
+                      rows.map((row) => renderSliceRow(mod, row))
+                    ) : (
+                      <p className="muted" style={{ margin: 0, fontSize: "0.8rem" }}>
+                        нет данных
+                      </p>
+                    )}
+                  </div>
+                ));
+              })()}
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function sampleAt(
+  points: Array<{ t: number; v: number }>,
+  t: number,
+  mode: "linear" | "step"
+): number | null {
+  if (points.length === 0) return null;
+  if (t <= points[0]!.t) return points[0]!.v;
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1]!;
+    const b = points[i]!;
+    if (t > b.t) continue;
+    if (mode === "step") return a.v;
+    const span = b.t - a.t || 1;
+    return a.v + ((b.v - a.v) * (t - a.t)) / span;
+  }
+  return points[points.length - 1]!.v;
+}
+
+type HoverTip = {
+  x: number;
+  y: number;
+  label: string;
+  value: string;
+  color: string;
+};
+
+function MultiChart({
+  continuous,
+  actuators,
+  yScale,
+  viewStart,
+  viewEnd,
+  markerT,
+  onMark,
+}: {
+  continuous: ContinuousSeries[];
+  actuators: ActuatorSeries[];
+  yScale: YScale;
+  viewStart: number;
+  viewEnd: number;
+  markerT: number | null;
+  onMark: (t: number) => void;
+}) {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const tipRef = useRef<HTMLDivElement>(null);
+  const clipId = useId().replace(/:/g, "");
+  const [box, setBox] = useState({ w: 1100, h: 420 });
+  const [hover, setHover] = useState<HoverTip | null>(null);
+  const [tipBox, setTipBox] = useState<{ left: number; top: number } | null>(
+    null
+  );
+
+  /** Keep tip near (sx, sy), prefer above-right, flip at plot edges. */
+  useLayoutEffect(() => {
+    if (!hover) {
+      setTipBox(null);
+      return;
+    }
+    const wrap = wrapRef.current;
+    const tip = tipRef.current;
+    if (!wrap || !tip) return;
+    const svg = wrap.querySelector("svg.lab-spark") as SVGSVGElement | null;
+    const ctm = svg?.getScreenCTM();
+    if (!svg || !ctm) return;
+
+    const pt = svg.createSVGPoint();
+    pt.x = hover.x;
+    pt.y = hover.y;
+    const screen = pt.matrixTransform(ctm);
+    const wrapRect = wrap.getBoundingClientRect();
+    const px = screen.x - wrapRect.left + wrap.scrollLeft;
+    const py = screen.y - wrapRect.top + wrap.scrollTop;
+
+    const tipW = tip.offsetWidth;
+    const tipH = tip.offsetHeight;
+    const gap = 12;
+    const edge = 6;
+    const cw = wrap.clientWidth;
+    const ch = wrap.clientHeight;
+
+    const placeRight = px + gap + tipW <= cw - edge;
+    const placeAbove = py - gap - tipH >= edge;
+    let left = placeRight ? px + gap : px - gap - tipW;
+    let top = placeAbove ? py - gap - tipH : py + gap;
+    left = Math.max(edge, Math.min(left, cw - tipW - edge));
+    top = Math.max(edge, Math.min(top, ch - tipH - edge));
+    setTipBox({ left, top });
+  }, [hover, box]);
+
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const apply = (width: number, height: number) => {
+      setBox({
+        w: Math.max(520, Math.floor(width)),
+        h: Math.max(180, Math.floor(height)),
+      });
+    };
+    apply(el.clientWidth, el.clientHeight);
+    const ro = new ResizeObserver((entries) => {
+      const cr = entries[0]?.contentRect;
+      if (!cr || cr.width < 2 || cr.height < 2) return;
+      apply(cr.width, cr.height);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const w = box.w;
+  const padL = Math.round(Math.min(150, Math.max(110, w * 0.1)));
+  const padR = 10;
+  const padT = 10;
+  const stacked = yScale === "stack";
+  const nCont = continuous.length;
+  /** Ниже этого полосы нечитаемы — лучше скролл, чем сплющивание. */
+  const bandMin = 38;
+
+  const timeRow = 22;
+  let laneH = 16;
+  let laneGap = 3;
+  let actuatorBand =
+    actuators.length > 0 ? actuators.length * (laneH + laneGap) + 10 : 0;
+
+  let plotH: number;
+  let svgH: number;
+  let bandH = bandMin;
+
+  if (nCont === 0) {
+    plotH = 32;
+    svgH = box.h;
+    const laneArea = Math.max(
+      actuators.length * 20,
+      svgH - padT - plotH - timeRow - 8
+    );
+    if (actuators.length > 0) {
+      laneGap = 3;
+      laneH = Math.max(
+        14,
+        Math.min(34, (laneArea - 8) / actuators.length - laneGap)
+      );
+      actuatorBand = actuators.length * (laneH + laneGap) + 8;
+    }
+  } else if (stacked) {
+    actuatorBand =
+      actuators.length > 0 ? actuators.length * (laneH + laneGap) + 10 : 0;
+    const chrome = padT + timeRow + actuatorBand;
+    const availPlot = Math.max(bandMin, box.h - chrome);
+    bandH = Math.max(bandMin, Math.floor(availPlot / nCont));
+    // Не раздувать полосы слишком высоко при малом числе рядов
+    bandH = Math.min(bandH, 56);
+    // Если в окно не влезает с bandMin — фиксируем min и скроллим
+    if (nCont * bandMin > availPlot) {
+      bandH = bandMin;
+    }
+    plotH = nCont * bandH;
+    svgH = padT + plotH + actuatorBand + timeRow;
+    if (svgH < box.h) {
+      const grow = Math.floor((box.h - svgH) / nCont);
+      if (grow > 0) {
+        bandH = Math.min(56, bandH + grow);
+        plotH = nCont * bandH;
+        svgH = padT + plotH + actuatorBand + timeRow;
+      }
+      // Добираем высоту контейнера без сплющивания полос
+      svgH = Math.max(svgH, box.h);
+    }
+  } else {
+    // auto / norm / fixed — уместить весь график в видимую область
+    actuatorBand =
+      actuators.length > 0 ? actuators.length * (laneH + laneGap) + 10 : 0;
+    let chrome = padT + timeRow + actuatorBand;
+    const minPlot = yScale === "norm" || yScale === "auto" ? 140 : 120;
+    if (chrome + minPlot > box.h && actuators.length > 0) {
+      const budget = Math.max(60, box.h - padT - timeRow - minPlot - 8);
+      laneH = Math.max(
+        10,
+        Math.min(18, Math.floor(budget / actuators.length) - laneGap)
+      );
+      actuatorBand = actuators.length * (laneH + laneGap) + 8;
+      chrome = padT + timeRow + actuatorBand;
+    }
+    svgH = box.h;
+    plotH = Math.max(minPlot, svgH - chrome);
+  }
+
+  const h = svgH;
+  const plotW = Math.max(80, w - padL - padR);
+
+  const allPts = continuous.flatMap((series) => series.points);
+  let tMin = viewStart;
+  let tMax = viewEnd;
+  if (tMax <= tMin) tMax = tMin + 1_000;
+
+  let yMin = 0;
+  let yMax = 1;
+  const normalize = yScale === "norm";
+  if (yScale === "0-5") yMax = 5;
+  else if (yScale === "0-100" || normalize) yMax = 100;
+  else if (yScale === "0-120") yMax = 120;
+  else if (!stacked && allPts.length > 0) {
+    yMin = Math.min(...allPts.map((point) => point.v));
+    yMax = Math.max(...allPts.map((point) => point.v));
+    if (yMax === yMin) {
+      yMin -= 1;
+      yMax += 1;
+    }
+    const pad = (yMax - yMin) * 0.08;
+    yMin -= pad;
+    yMax += pad;
+  }
+
+  const xOf = (t: number) => padL + ((t - tMin) / (tMax - tMin)) * plotW;
+  const yOf = (v: number) =>
+    padT + plotH - ((v - yMin) / (yMax - yMin || 1)) * plotH;
+  const tOf = (x: number) => tMin + ((x - padL) / plotW) * (tMax - tMin);
+
+  function autoRange(points: Array<{ t: number; v: number }>) {
+    let min = points.length > 0 ? Math.min(...points.map((point) => point.v)) : 0;
+    let max = points.length > 0 ? Math.max(...points.map((point) => point.v)) : 1;
+    if (max === min) {
+      min -= 1;
+      max += 1;
+    }
+    const pad = (max - min) * 0.08;
+    return { min: min - pad, max: max + pad };
+  }
+
+  function seriesYMap(series: ContinuousSeries, index: number) {
+    if (stacked) {
+      const top = padT + index * bandH + 5;
+      const bottom = padT + (index + 1) * bandH - 5;
+      const range = autoRange(series.points);
+      return (v: number) =>
+        bottom -
+        ((v - range.min) / (range.max - range.min || 1)) * (bottom - top);
+    }
+    if (!normalize) return yOf;
+    const range = autoRange(series.points);
+    return (v: number) =>
+      padT + plotH - ((v - range.min) / (range.max - range.min || 1)) * plotH;
+  }
+
+  function pathFor(
+    points: Array<{ t: number; v: number }>,
+    yMap: (v: number) => number
+  ) {
+    return points
+      .map((point, index) => {
+        const command = index === 0 ? "M" : "L";
+        return `${command}${xOf(point.t).toFixed(1)},${yMap(point.v).toFixed(1)}`;
+      })
+      .join(" ");
+  }
+
+  const hasData =
+    continuous.some((series) => series.points.length > 0) ||
+    actuators.some((series) => series.points.length > 0);
+  const strokeW =
+    nCont > 10 ? 1.4 : nCont > 5 ? 1.8 : 2.2;
+  const bandHStack = stacked ? bandH : plotH;
+
+  function onMove(event: ReactMouseEvent<SVGSVGElement>) {
+    const svg = event.currentTarget;
+    const ctm = svg.getScreenCTM();
+    if (!ctm) return;
+    const pt = svg.createSVGPoint();
+    pt.x = event.clientX;
+    pt.y = event.clientY;
+    const local = pt.matrixTransform(ctm.inverse());
+    const sx = local.x;
+    const sy = local.y;
+    if (sx < padL || sx > padL + plotW) {
+      setHover(null);
+      return;
+    }
+    const t = tOf(sx);
+    let best: HoverTip | null = null;
+    let bestDist = Number.POSITIVE_INFINITY;
+
+    // Сначала полосы клапанов — попадание по ряду, не «ближайшая кривая»
+    actuators.forEach((series, index) => {
+      const top = padT + plotH + 6 + index * (laneH + laneGap);
+      const midY = top + laneH / 2;
+      const dist = Math.abs(midY - sy);
+      if (dist > laneH * 0.55) return;
+      if (dist >= bestDist) return;
+      const v = sampleAt(series.points, t, "step");
+      if (v == null) return;
+      bestDist = dist;
+      best = {
+        x: sx,
+        y: midY,
+        label: series.label,
+        value: v >= 0.5 ? "ON" : "OFF",
+        color: series.color,
+      };
+    });
+
+    if (best == null) {
+      const contLimit = Math.max(14, bandHStack * 0.4);
+      continuous.forEach((series, index) => {
+        const v = sampleAt(series.points, t, "linear");
+        if (v == null) return;
+        const yMap = seriesYMap(series, index);
+        const y = yMap(v);
+        const dist = Math.abs(y - sy);
+        if (dist > contLimit || dist >= bestDist) return;
+        bestDist = dist;
+        best = {
+          x: sx,
+          y,
+          label: series.label,
+          value: `${v.toFixed(3)}${series.unit ? ` ${series.unit}` : ""}`,
+          color: series.color,
+        };
+      });
+    }
+
+    setHover(best);
+  }
+
+  return (
+    <div
+      ref={wrapRef}
+      className="lab-chart-plot-inner"
+      style={{ height: Math.max(box.h, h) }}
+    >
+      <svg
+        viewBox={`0 0 ${w} ${h}`}
+        width="100%"
+        height={h}
+        preserveAspectRatio="xMidYMin meet"
+        className="lab-spark lab-spark-lg lab-spark-interactive"
+        onMouseMove={onMove}
+        onMouseLeave={() => setHover(null)}
+        onClick={(event) => {
+          const svg = event.currentTarget;
+          const ctm = svg.getScreenCTM();
+          if (!ctm) return;
+          const pt = svg.createSVGPoint();
+          pt.x = event.clientX;
+          pt.y = event.clientY;
+          const local = pt.matrixTransform(ctm.inverse());
+          if (local.x >= padL && local.x <= padL + plotW) onMark(tOf(local.x));
+        }}
+      >
+        <defs>
+          <clipPath id={`lab-plot-clip-${clipId}`}>
+            <rect x={padL} y={padT} width={plotW} height={plotH} />
+          </clipPath>
+        </defs>
+        <rect
+          x={padL}
+          y={padT}
+          width={plotW}
+          height={plotH}
+          fill="rgba(0,0,0,0.2)"
+          rx={4}
+        />
+        {stacked
+          ? continuous.map((series, index) => {
+              const top = padT + index * bandH;
+              const labelY = top + Math.min(14, bandH * 0.55);
+              return (
+                <g key={`band-${series.id}`}>
+                  <line
+                    x1={padL}
+                    x2={padL + plotW}
+                    y1={top}
+                    y2={top}
+                    stroke="rgba(255,255,255,0.1)"
+                  />
+                  <text
+                    x={6}
+                    y={labelY}
+                    fill={series.color}
+                    fontSize={bandH < 34 ? 9 : 10}
+                  >
+                    {compactSeriesLabel(series.label, series.code)}
+                  </text>
+                </g>
+              );
+            })
+          : Array.from({ length: 5 }, (_, index) => {
+              const y = padT + (plotH * index) / 4;
+              return (
+                <line
+                  key={`hg-${index}`}
+                  x1={padL}
+                  x2={padL + plotW}
+                  y1={y}
+                  y2={y}
+                  stroke="rgba(255,255,255,0.08)"
+                />
+              );
+            })}
+        {Array.from({ length: 9 }, (_, index) => {
+          const x = padL + (plotW * index) / 8;
+          return (
+            <line
+              key={`vg-${index}`}
+              x1={x}
+              x2={x}
+              y1={padT}
+              y2={padT + plotH}
+              stroke="rgba(255,255,255,0.06)"
+            />
+          );
+        })}
+        {!stacked ? (
+          <>
+            <text x={6} y={padT + 10} fill="var(--text-muted)" fontSize="11">
+              {normalize ? "100%" : yMax.toFixed(2)}
+            </text>
+            <text x={6} y={padT + plotH} fill="var(--text-muted)" fontSize="11">
+              {normalize ? "0%" : yMin.toFixed(2)}
+            </text>
+          </>
+        ) : null}
+        {!hasData ? (
+          <text
+            x={w / 2}
+            y={padT + plotH / 2}
+            textAnchor="middle"
+            fill="var(--text-muted)"
+            fontSize="14"
+          >
+            Нет точек в выбранном окне
+          </text>
+        ) : null}
+        <g clipPath={`url(#lab-plot-clip-${clipId})`}>
+          {continuous.map((series, index) => (
+            <path
+              key={series.id}
+              d={pathFor(series.points, seriesYMap(series, index))}
+              fill="none"
+              stroke={series.color}
+              strokeWidth={strokeW}
+              opacity={nCont > 12 ? 0.85 : 1}
+            />
+          ))}
+        </g>
+        {actuators.map((series, index) => {
+          const top = padT + plotH + 6 + index * (laneH + laneGap);
+          const yHi = top + 1;
+          const yLo = top + laneH - 1;
+          const fills: string[] = [];
+          for (let i = 0; i < series.points.length - 1; i++) {
+            const p0 = series.points[i]!;
+            const p1 = series.points[i + 1]!;
+            if (p0.v >= 0.5) {
+              fills.push(
+                `M${xOf(p0.t).toFixed(1)},${yLo} L${xOf(p0.t).toFixed(1)},${yHi} ` +
+                  `L${xOf(p1.t).toFixed(1)},${yHi} L${xOf(p1.t).toFixed(1)},${yLo} Z`
+              );
+            }
+          }
+          return (
+            <g key={series.id}>
+              <text
+                x={4}
+                y={top + laneH - 3}
+                fill="var(--text-muted)"
+                fontSize="10"
+              >
+                {laneLabel(series.label)}
+              </text>
+              <rect
+                x={padL}
+                y={top}
+                width={plotW}
+                height={laneH}
+                fill="rgba(255,255,255,0.04)"
+                rx={2}
+              />
+              {fills.map((d, fillIndex) => (
+                <path
+                  key={fillIndex}
+                  d={d}
+                  fill={series.color}
+                  fillOpacity={0.55}
+                  stroke="none"
+                />
+              ))}
+            </g>
+          );
+        })}
+        {markerT != null && markerT >= tMin && markerT <= tMax ? (
+          <line
+            className="lab-chart-marker"
+            x1={xOf(markerT)}
+            x2={xOf(markerT)}
+            y1={padT}
+            y2={h - 20}
+            stroke="var(--accent)"
+            strokeWidth="1.5"
+            strokeDasharray="4 3"
+          />
+        ) : null}
+        {hover ? (
+          <>
+            <line
+              x1={hover.x}
+              x2={hover.x}
+              y1={padT}
+              y2={h - 20}
+              stroke={hover.color}
+              strokeWidth="1"
+              strokeOpacity={0.45}
+            />
+            <circle
+              cx={hover.x}
+              cy={hover.y}
+              r={4}
+              fill={hover.color}
+              stroke="#0f1419"
+              strokeWidth="1.5"
+            />
+          </>
+        ) : null}
+        <text x={padL} y={h - 6} fill="var(--text-muted)" fontSize="10">
+          {new Date(tMin).toLocaleTimeString()}
+        </text>
+        <text
+          x={w - padR}
+          y={h - 6}
+          textAnchor="end"
+          fill="var(--text-muted)"
+          fontSize="10"
+        >
+          {new Date(tMax).toLocaleTimeString()}
+        </text>
+      </svg>
+      {hover ? (
+        <div
+          ref={tipRef}
+          className="lab-chart-hover-tip"
+          style={{
+            left: tipBox?.left ?? 0,
+            top: tipBox?.top ?? 0,
+            borderColor: hover.color,
+            opacity: tipBox ? 1 : 0,
+          }}
+        >
+          <strong style={{ color: hover.color }}>{hover.label}</strong>
+          <span>{hover.value}</span>
+        </div>
+      ) : null}
+    </div>
+  );
+}

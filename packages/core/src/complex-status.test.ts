@@ -6,6 +6,8 @@ import assert from "node:assert/strict";
 import {
   parseComplexStatusTuple,
   complexTupleSummary,
+  extractOpenValveNumbers,
+  mergeOpenValveNumbers,
 } from "./index.js";
 
 describe("complex-status", () => {
@@ -33,6 +35,28 @@ describe("complex-status", () => {
     assert.ok(tuple.hosts.water.sensorCount >= 2);
     assert.equal(tuple.hosts.water.waterPressure, 1.5);
     assert.match(complexTupleSummary(tuple), /milk:/);
+  });
+
+  it("facade milkSensors + milkValves [] → temps filled, fridge all OFF (not unknown)", () => {
+    const facade = {
+      format: "drinkx-1.0",
+      milkSensors: [
+        { name: "milk_input", type: "temp", value: 6.2 },
+        { name: "milk_heater1_out", type: "temp", value: 55 },
+      ],
+      coffeeSensors: [{ name: "coffee_input", type: "temp", value: 24 }],
+      waterSensors: [{ name: "water_input", type: "temp", value: 18 }],
+      milkValves: [] as number[],
+      coffeeValves: [] as number[],
+      waterValves: [] as number[],
+    };
+    const tuple = parseComplexStatusTuple([facade]);
+    assert.equal(tuple.hosts.milk.temps.input, 6.2);
+    assert.equal(tuple.hosts.coffee.temps.input, 24);
+    assert.equal(tuple.hosts.water.temps.input, 18);
+    // Explicit [] = all closed (not null/yellow unknown)
+    assert.deepEqual(extractOpenValveNumbers(facade), []);
+    assert.deepEqual(mergeOpenValveNumbers([]), []);
   });
 
   it("merges module replies by hwid", () => {

@@ -217,6 +217,11 @@ export const CONTROL_HELPS: Record<string, ControlHelp> = {
     title: "Графики",
     body: "Показать/скрыть live-графики датчиков комплекса по трекам.",
   },
+  "modules.chartLog": {
+    id: "modules.chartLog",
+    title: "Лог графика",
+    body: "Открывает окно графика без активного опроса. Можно импортировать JSON, сохранённый через «Экспорт лога» в окне графика. Работает и без сессии комплекса.",
+  },
   "modules.tracks": {
     id: "modules.tracks",
     title: "Треки",
@@ -245,7 +250,12 @@ export const CONTROL_HELPS: Record<string, ControlHelp> = {
   "modules.valvesAll": {
     id: "modules.valvesAll",
     title: "Открыть/закрыть все",
-    body: "Последовательно открыть или закрыть все клапаны текущего host.",
+    body: "Последовательно открыть или закрыть все DX-клапаны текущего host (milkInput, drain, …). Не путать с молочными клапанами холодильника.",
+  },
+  "modules.milkValves": {
+    id: "modules.milkValves",
+    title: "Молочные клапана холодильника",
+    body: "Клапаны 1–6 молочного блока (I2C). При brew с киоска состояние приходит по bus complexos.valves.switched (и status.*Valves если модуль отдаёт). История ON/OFF → графики (msValveN). Ручной debug-valves на DrinkX facade часто не реализован — жёлтая лампа до первого bus-события нормальна.",
   },
   "modules.valvePackage": {
     id: "modules.valvePackage",
@@ -410,7 +420,7 @@ export const CONTROL_HELPS: Record<string, ControlHelp> = {
   "nav.settings": {
     id: "nav.settings",
     title: "Настройки",
-    body: "Тема уже тёмная. Здесь — Debug-режим, сервисный пароль для правок, пути к ключам.",
+    body: "Тема уже тёмная. Здесь — Lab опрос в фоне, Debug-режим, сервисный пароль для правок, пути к ключам.",
   },
   "access.generateKey": {
     id: "access.generateKey",
@@ -499,6 +509,16 @@ export const CONTROL_HELPS: Record<string, ControlHelp> = {
     title: "Debug-режим",
     body: "Пишет подробные логи на диск. При сбое приложите файл из папки debug-logs в чат с ассистентом.",
   },
+  "settings.labChartLog": {
+    id: "settings.labChartLog",
+    title: "Открыть лог графика",
+    body: "Открывает окно графика комплекса без SSH/NATS. Нажмите «Импорт лога» и выберите JSON, сохранённый через «Экспорт лога» (kind: service-monitor-lab-chart). Масштаб времени, стек/норм, маркер и срез работают как в живом режиме.",
+  },
+  "settings.labBgTelemetry": {
+    id: "settings.labBgTelemetry",
+    title: "Lab опрос в фоне",
+    body: "Если включено — после SSH-сессии Modules Lab продолжает NATS/DX опрос вне вкладки Модули, и отдельное окно графиков не закрывается при уходе с Модулей. Выкл — опрос только на вкладке Модули (пробелы на графике после возврата). Без сессии окно лога не закрывается при смене вкладки.",
+  },
 };
 
 export function getControlHelp(id: string): ControlHelp | undefined {
@@ -556,12 +576,13 @@ export const HELP_ARTICLES: HelpArticle[] = [
       "coffeemachine.status / getStatus() НЕ отдаёт pump_R_IS и PWM —",
       "ток: HTTP DX UI :8000 (temps). ШИМ тэнов в Lab: оценка PidClassic.start",
       "clamp(25…75, (target−temp)×1.5) — DX graph lastlog после brew залипает.",
-      "Опрос: LabTelemetry (NATS ~1.1s + DX ~1.5s). Pause команды не стопит DX.",
+      "*_heater*_power в status — дубль температуры (type=power), не ШИМ.",
+      "Опрос: LabTelemetry (NATS ~1.1s + DX ~1.5s). status primary {hwid:dx}.",
       "Туннель :8082 → milk .44. При reverse R_IS не отрицательный (АЦП Type:V).",
       "",
-      "Частая полевая ловушка: milk Pi на 192.168.1.33 вместо .44.",
+      "Частая полевая ловушка: milk Pi на 192.168.1.33 вместо .44 (4.7: .33 REACHABLE но не DX).",
       "NATS через complexos может работать, а :8082/графики — пустые.",
-      "Эталон: complexos=.43, milk=.44, coffee=.45, water=.46.",
+      "Эталон: complexos=.43, milk=.44, coffee=.45, water=.46 (референс 4.8).",
       "Проверьте leases роутера / static IP, затем «Графики milk» на Сессии.",
       "",
       "Brew Lab: qty в миллисекундах насоса, не мл. Пароль + confirm.",

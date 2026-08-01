@@ -231,7 +231,7 @@ export function ComplexOsPage() {
       void safeDesktopCall(
         "natsUnsubscribeBus",
         () =>
-          window.desktop.natsUnsubscribeBus?.() ??
+          window.desktop.natsUnsubscribeBus?.("complexos") ??
           Promise.resolve({ ok: true as const }),
         { ok: true as const }
       );
@@ -243,11 +243,14 @@ export function ComplexOsPage() {
       const sub = await safeDesktopCall(
         "natsSubscribeBus",
         () =>
-          window.desktop.natsSubscribeBus?.([
-            COMPLEXOS_SUBJECTS.alertCreated,
-            COMPLEXOS_SUBJECTS.alertCleared,
-            COMPLEXOS_SUBJECTS.helpNeeded,
-          ]) ??
+          window.desktop.natsSubscribeBus?.(
+            [
+              COMPLEXOS_SUBJECTS.alertCreated,
+              COMPLEXOS_SUBJECTS.alertCleared,
+              COMPLEXOS_SUBJECTS.helpNeeded,
+            ],
+            "complexos"
+          ) ??
           Promise.resolve({
             ok: false as const,
             error: "natsSubscribeBus missing",
@@ -280,7 +283,7 @@ export function ComplexOsPage() {
       void safeDesktopCall(
         "natsUnsubscribeBus",
         () =>
-          window.desktop.natsUnsubscribeBus?.() ??
+          window.desktop.natsUnsubscribeBus?.("complexos") ??
           Promise.resolve({ ok: true as const }),
         { ok: true as const }
       );

@@ -41,17 +41,30 @@ describe("chart-layout", () => {
     assert.equal(rest.length, 0);
   });
 
-  it("lays out water in 3 columns", () => {
-    const { slots } = layoutModuleChartKeys("water", [
+  it("lays out water in 3 columns with heaters/PWM", () => {
+    const { slots, rest } = layoutModuleChartKeys("water", [
       seriesKey("water", "waterTotalPulses"),
       seriesKey("water", "input"),
       seriesKey("water", "waterPressure"),
+      seriesKey("water", "heater1_out"),
+      seriesKey("water", "heater2_out"),
+      seriesKey("water", "heater1_pwm"),
+      seriesKey("water", "heater2_pwm"),
+      seriesKey("water", "pumpCurrent"),
+      seriesKey("water", "pumpCurrentL"),
     ]);
     assert.equal(moduleChartColumns("water"), 3);
     assert.deepEqual(slots, [
       "water.input",
       "water.waterPressure",
       "water.waterTotalPulses",
+      "water.heater1_out",
+      "water.heater2_out",
+      "water.pumpCurrent",
+      "water.heater1_pwm",
+      "water.heater2_pwm",
+      "water.pumpCurrentL",
     ]);
+    assert.equal(rest.length, 0);
   });
 });

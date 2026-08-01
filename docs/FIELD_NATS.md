@@ -24,10 +24,12 @@
 
 | Показатель | Источник |
 |------------|----------|
-| Температуры / pressure / pulses | NATS `coffeemachine.status` (many) |
-| Мощность насоса % | NATS `pumps.status` (+ optimistic cmd) |
-| R_IS / L_IS | HTTP DX UI `:8000` (туннель 8082/8083) — вольты АЦП |
-| ШИМ тэнов | оценка `(target−temp)×1.5` clamp 25–75; **не** DX graph |
+| Температуры / pressure / pulses | NATS `coffeemachine.status` **`{ hwid: "dx" }`** (fallback many `{}`) |
+| Холодильник msValve 1…6 | status `milkValves`/`coffeeValves` (idle `[]` = все OFF) + bus `complexos.valves.switched` |
+| Мощность насоса % | NATS `pumps.status.{milk,coffee,water}` (+ optimistic cmd) |
+| R_IS / L_IS | HTTP DX UI `:8000` (туннель 8082–8084) — вольты АЦП; milk=.44 (**не** `.33`) |
+| ШИМ тэнов | оценка `(target−temp)×1.5` clamp 25–75; **не** DX graph; **не** status `*_heater*_power` (дубль temp) |
+| Health per host | snapshot `hostHealth`: NATS (pump/status) vs DX HTTP |
 
 Опрос: `LabTelemetryController` — NATS ~1.1s, DX ~1.5s отдельно. Pause на команду не стопит DX.
 
@@ -52,9 +54,10 @@
 
 ## Payload (частое)
 
-- `{}` или `{ "hwid": "dx" }` — status / muster
+- **`{ "hwid": "dx" }`** — Lab status primary (facade: `milkSensors`/`*Valves`); `{}` — fallback / гонка одного модуля
 - `hwid`: `dx` (facade), `dx.milk` / `dx.coffee` / `dx.water`
 - `pumps.<host>!`: `{ "duration": 3000, "power": 200, "direction": "forward"|"reverse" }`
 - brew: `coffeeRecipe.parts[].qty` — **мс насоса**, не мл
+- Fridge: не poll `valves.status.milk-msValveN`; live — bus + status `*Valves`
 
 Где смотреть в ERP: `cm-drv/coffeemachine-drv.js`, `cm-drv/drivers/dx/direct-device-api.js`, `complexos/api/dashboard-api.ts`, Dashboard → Logs.

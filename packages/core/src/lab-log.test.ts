@@ -114,6 +114,57 @@ describe("lab-log", () => {
     const power = pumpPowerSeries(events, null, 200, "water");
     assert.equal(power[0]!.v, 80);
     assert.equal(power.at(-1)!.v, 0);
+
+    // ON до окна since не теряется; линия тянется до now
+    const held = booleanStepSeries(
+      [
+        createLabEvent({
+          kind: "valve",
+          module: "milk",
+          hwid: "dx.milk",
+          name: "air",
+          value: true,
+          at: "2026-07-31T11:00:00.000Z",
+        }),
+      ],
+      "valve",
+      "milk.air",
+      Date.parse("2026-07-31T12:00:00.000Z"),
+      400,
+      Date.parse("2026-07-31T12:05:00.000Z")
+    );
+    assert.equal(held[0]!.v, 1);
+    assert.equal(held[0]!.t, Date.parse("2026-07-31T12:00:00.000Z"));
+    assert.equal(held.at(-1)!.v, 1);
+    assert.equal(held.at(-1)!.t, Date.parse("2026-07-31T12:05:00.000Z"));
+  });
+
+  it("sensorSeries holds value across window edges", () => {
+    const events = [
+      createLabEvent({
+        kind: "sensor",
+        module: "milk",
+        hwid: "dx.milk",
+        name: "input",
+        value: 20,
+        at: "2026-07-31T11:59:00.000Z",
+      }),
+      createLabEvent({
+        kind: "sensor",
+        module: "milk",
+        hwid: "dx.milk",
+        name: "input",
+        value: 22,
+        at: "2026-07-31T12:01:00.000Z",
+      }),
+    ];
+    const since = Date.parse("2026-07-31T12:00:00.000Z");
+    const until = Date.parse("2026-07-31T12:05:00.000Z");
+    const pts = sensorSeries(events, "milk.input", 2000, since, until);
+    assert.equal(pts[0]!.t, since);
+    assert.equal(pts[0]!.v, 20);
+    assert.equal(pts.at(-1)!.t, until);
+    assert.equal(pts.at(-1)!.v, 22);
   });
 
   it("chart meta, keys, snapshot, catalog", () => {
@@ -127,6 +178,8 @@ describe("lab-log", () => {
     assert.equal(chartSeriesMeta("pumpCurrent").unit, "V");
     assert.equal(chartSinceMs("all"), null);
     assert.ok(complexSensorCatalog().includes("milk.pumpCurrent"));
+    assert.ok(complexSensorCatalog().includes("water.heater1_pwm"));
+    assert.ok(complexSensorCatalog().includes("water.heater2_pwm"));
 
     const events = [
       createLabEvent({

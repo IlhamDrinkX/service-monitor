@@ -8,6 +8,8 @@
  *
  * water:
  *   [input] [pressure] [pulses]
+ *   [heater1] [heater2] [—]
+ *   [pwm1] [pwm2] [—]
  */
 
 import type { DrinkxHost } from "./module-devices.js";
@@ -32,6 +34,12 @@ const WATER_SLOTS: Array<string | null> = [
   "input",
   "waterPressure",
   "waterTotalPulses",
+  "heater1_out",
+  "heater2_out",
+  "pumpCurrent",
+  "heater1_pwm",
+  "heater2_pwm",
+  "pumpCurrentL",
 ];
 
 function localName(series: string): string {

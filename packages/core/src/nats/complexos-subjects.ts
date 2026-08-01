@@ -23,6 +23,8 @@ export const COMPLEXOS_SUBJECTS = {
   helpNeeded: "complexos.bus.helpNeeded",
   alertCreated: "complexos.bus.alertCreated",
   alertCleared: "complexos.bus.alertCleared",
+  /** I2C milk-fridge valves during brew (real-cm onSwitch). */
+  valvesSwitched: "complexos.valves.switched",
 } as const;
 
 /** Ключи timings мойки — читаются из cleaning-config, пишутся через update-config. */

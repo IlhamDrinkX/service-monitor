@@ -78,8 +78,20 @@ export {
   FLOW_CALIBRATION_BREW_TIMEOUT_MS,
   FLOW_CALIBRATION_PULSES_POLL_MS,
   milkSystemValveNumbers,
+  MILK_SYSTEM_VALVE_IDS,
+  milkSystemValveId,
+  milkSystemValveHwIndex,
+  extractOpenValveNumbers,
+  mergeOpenValveNumbers,
+  natsReplyIsError,
 } from "./nats/module-devices.js";
-export type { DrinkxHost, TempSensorKey, PumpDirection, HeaterStatusSnap } from "./nats/module-devices.js";
+export type {
+  DrinkxHost,
+  TempSensorKey,
+  PumpDirection,
+  HeaterStatusSnap,
+  MilkSystemValveId,
+} from "./nats/module-devices.js";
 export {
   createLabEvent,
   formatLabTerminalLine,
@@ -183,6 +195,7 @@ export type {
   TimedValue,
   TelemetrySource,
   LabSnapshot,
+  LabHostHealth,
   LabHostHeaters,
   LabHostPwm,
 } from "./nats/lab-telemetry.js";

@@ -174,13 +174,14 @@ export type DesktopApi = {
     { ok: true } | { ok: false; error: string }
   >;
   natsSubscribeBus: (
-    subjects: string[]
+    subjects: string[],
+    clientId?: string
   ) => Promise<
     { ok: true; subjects: string[] } | { ok: false; error: string }
   >;
-  natsUnsubscribeBus: () => Promise<
-    { ok: true } | { ok: false; error: string }
-  >;
+  natsUnsubscribeBus: (
+    clientId?: string
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
   natsUpdateConfig: (
     patch: Record<string, unknown>
   ) => Promise<{ ok: true; data: unknown } | { ok: false; error: string }>;
@@ -239,6 +240,14 @@ export type DesktopApi = {
           error?: string;
           via?: "http" | "ssh";
         };
+        water: {
+          pump_R_IS: number | null;
+          pump_L_IS: number | null;
+          heater1_pwm: number | null;
+          heater2_pwm: number | null;
+          error?: string;
+          via?: "http" | "ssh";
+        };
       }
     | {
         ok: false;
@@ -255,8 +264,29 @@ export type DesktopApi = {
           heater1_pwm: number | null;
           heater2_pwm: number | null;
         };
+        water: {
+          pump_R_IS: number | null;
+          pump_L_IS: number | null;
+          heater1_pwm: number | null;
+          heater2_pwm: number | null;
+        };
       }
   >;
+  openLabChartWindow: (input?: {
+    focusSensor?: string | null;
+  }) => Promise<{ ok: true } | { ok: false; error: string }>;
+  syncLabChartState: (payload: unknown) => Promise<{ ok: true }>;
+  pullLabChartState: () => Promise<unknown>;
+  labChartIsOpen: () => Promise<{ open: boolean }>;
+  closeLabChartWindow: () => Promise<{ ok: true }>;
+  labChartToggleFullScreen: () => Promise<
+    { ok: true; fullScreen: boolean } | { ok: false }
+  >;
+  onLabChartState: (cb: (payload: unknown) => void) => () => void;
+  onLabChartFocus: (
+    cb: (payload: { focusSensor?: string | null }) => void
+  ) => () => void;
+  onLabChartClosed: (cb: () => void) => () => void;
 };
 
 const api: DesktopApi = {
@@ -315,9 +345,10 @@ const api: DesktopApi = {
   natsRequestMany: (input) => ipcRenderer.invoke("nats:requestMany", input),
   natsPublish: (input) => ipcRenderer.invoke("nats:publish", input),
   natsSubscribeStatus: () => ipcRenderer.invoke("nats:subscribeStatus"),
-  natsSubscribeBus: (subjects) =>
-    ipcRenderer.invoke("nats:subscribeBus", subjects),
-  natsUnsubscribeBus: () => ipcRenderer.invoke("nats:unsubscribeBus"),
+  natsSubscribeBus: (subjects, clientId) =>
+    ipcRenderer.invoke("nats:subscribeBus", subjects, clientId),
+  natsUnsubscribeBus: (clientId) =>
+    ipcRenderer.invoke("nats:unsubscribeBus", clientId),
   natsUpdateConfig: (patch) => ipcRenderer.invoke("nats:updateConfig", patch),
   onNatsState: (cb) => {
     const handler = (_e: IpcRendererEvent, info: NatsConnectionInfo) =>
@@ -351,6 +382,31 @@ const api: DesktopApi = {
     return () => ipcRenderer.removeListener("flash:log", handler);
   },
   dxUiPumpCurrents: (input) => ipcRenderer.invoke("dxUi:pumpCurrents", input),
+  openLabChartWindow: (input) => ipcRenderer.invoke("labChart:open", input ?? {}),
+  syncLabChartState: (payload) => ipcRenderer.invoke("labChart:sync", payload),
+  pullLabChartState: () => ipcRenderer.invoke("labChart:pull"),
+  labChartIsOpen: () => ipcRenderer.invoke("labChart:isOpen"),
+  closeLabChartWindow: () => ipcRenderer.invoke("labChart:close"),
+  labChartToggleFullScreen: () =>
+    ipcRenderer.invoke("labChart:toggleFullScreen"),
+  onLabChartState: (cb) => {
+    const handler = (_e: IpcRendererEvent, payload: unknown) => cb(payload);
+    ipcRenderer.on("labChart:state", handler);
+    return () => ipcRenderer.removeListener("labChart:state", handler);
+  },
+  onLabChartFocus: (cb) => {
+    const handler = (
+      _e: IpcRendererEvent,
+      payload: { focusSensor?: string | null }
+    ) => cb(payload);
+    ipcRenderer.on("labChart:focus", handler);
+    return () => ipcRenderer.removeListener("labChart:focus", handler);
+  },
+  onLabChartClosed: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on("labChart:closed", handler);
+    return () => ipcRenderer.removeListener("labChart:closed", handler);
+  },
 };
 
 contextBridge.exposeInMainWorld("desktop", api);

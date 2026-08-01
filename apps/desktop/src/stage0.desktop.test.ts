@@ -30,6 +30,7 @@ describe("desktop / stage0 content wiring", () => {
       "session.dashboard",
       "session.kiosk",
       "settings.debug",
+      "settings.labBgTelemetry",
     ];
     for (const id of required) {
       assert.ok(CONTROL_HELPS[id], id);

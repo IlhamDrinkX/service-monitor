@@ -15,9 +15,22 @@ import { ModulesPage } from "./pages/ModulesPage";
 import { PeripheralsPage } from "./pages/PeripheralsPage";
 import { SessionPage } from "./pages/SessionPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { LabChartWindowPage } from "./components/ModulesLabCharts";
+import {
+  LAB_BG_TELEMETRY_EVENT,
+  readLabBgTelemetry,
+} from "./lib/lab-bg-telemetry";
 import { smLog } from "./lib/sm-log";
 import { SessionProvider } from "./state/SessionContext";
 import { useComplexSession } from "./state/useComplexSession";
+
+function isLabChartView(): boolean {
+  try {
+    return new URLSearchParams(window.location.search).get("view") === "lab-chart";
+  } catch {
+    return false;
+  }
+}
 
 type TabId =
   | "fleet"
@@ -95,8 +108,13 @@ function AppShell() {
       return false;
     }
   });
+  const [labBgTelemetry, setLabBgTelemetry] = useState(readLabBgTelemetry);
   const current = useMemo(() => TABS.find((t) => t.id === tab)!, [tab]);
   const { session, warn } = useComplexSession();
+
+  const keepModulesAlive = labBgTelemetry && session.connected === true;
+  const modulesVisible = tab === "modules";
+  const modulesMounted = modulesVisible || keepModulesAlive;
 
   useEffect(() => {
     try {
@@ -109,6 +127,28 @@ function AppShell() {
   useEffect(() => {
     smLog("info", "nav", `tab → ${tab}`);
   }, [tab]);
+
+  useEffect(() => {
+    const onPref = (e: Event) => {
+      const detail = (e as CustomEvent<{ enabled: boolean }>).detail;
+      if (detail && typeof detail.enabled === "boolean") {
+        setLabBgTelemetry(detail.enabled);
+      } else {
+        setLabBgTelemetry(readLabBgTelemetry());
+      }
+    };
+    window.addEventListener(LAB_BG_TELEMETRY_EVENT, onPref);
+    return () => window.removeEventListener(LAB_BG_TELEMETRY_EVENT, onPref);
+  }, []);
+
+  /** Уход с Модулей → закрыть окно графиков, если фон-опрос выкл.
+   * Без сессии окно не трогаем — нужен offline-просмотр импортированного лога. */
+  useEffect(() => {
+    if (tab === "modules") return;
+    if (keepModulesAlive) return;
+    if (!session.connected) return;
+    void window.desktop.closeLabChartWindow?.();
+  }, [tab, keepModulesAlive, session.connected]);
 
   return (
     <div
@@ -139,21 +179,20 @@ function AppShell() {
           {collapsed ? "»" : "«"}
         </button>
         {TABS.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            className={`nav-btn${tab === t.id ? " active" : ""}${
-              t.id === "session" && warn ? " nav-warn" : ""
-            }`}
-            title={t.title}
-            onClick={() => setTab(t.id)}
-          >
-            <span className="nav-icon" aria-hidden>
-              {t.icon}
-            </span>
-            <span className="nav-label">{t.label}</span>
+          <div key={t.id} className="nav-row">
+            <button
+              type="button"
+              className={`nav-btn${tab === t.id ? " active" : ""}`}
+              onClick={() => setTab(t.id)}
+              title={collapsed ? t.title : undefined}
+            >
+              <span className="nav-icon" aria-hidden>
+                {t.icon}
+              </span>
+              <span className="nav-label">{t.label}</span>
+            </button>
             {!collapsed ? <HelpTip controlId={t.helpId} /> : null}
-          </button>
+          </div>
         ))}
       </aside>
 
@@ -169,19 +208,36 @@ function AppShell() {
                 ? "Local LAN · ok"
                 : `Remote ${session.seriesLabel} · ok`}
           </span>
+          {labBgTelemetry && session.connected ? (
+            <span className="badge on" title="Lab опрос в фоне для графиков">
+              Lab фон
+            </span>
+          ) : null}
         </header>
         <main className="content">
-          <ErrorBoundary label={tab} key={tab}>
-            {tab === "fleet" ? <FleetPage /> : null}
-            {tab === "access" ? <AccessPage /> : null}
-            {tab === "session" ? <SessionPage /> : null}
-            {tab === "modules" ? <ModulesPage /> : null}
-            {tab === "peripherals" ? <PeripheralsPage /> : null}
-            {tab === "complexos" ? <ComplexOsPage /> : null}
-            {tab === "config" ? <ConfigPage /> : null}
-            {tab === "help" ? <HelpPage /> : null}
-            {tab === "settings" ? <SettingsPage /> : null}
-          </ErrorBoundary>
+          {modulesMounted ? (
+            <div
+              hidden={!modulesVisible}
+              aria-hidden={!modulesVisible}
+              style={modulesVisible ? undefined : { display: "none" }}
+            >
+              <ErrorBoundary label="modules">
+                <ModulesPage />
+              </ErrorBoundary>
+            </div>
+          ) : null}
+          {tab !== "modules" ? (
+            <ErrorBoundary label={tab} key={tab}>
+              {tab === "fleet" ? <FleetPage /> : null}
+              {tab === "access" ? <AccessPage /> : null}
+              {tab === "session" ? <SessionPage /> : null}
+              {tab === "peripherals" ? <PeripheralsPage /> : null}
+              {tab === "complexos" ? <ComplexOsPage /> : null}
+              {tab === "config" ? <ConfigPage /> : null}
+              {tab === "help" ? <HelpPage /> : null}
+              {tab === "settings" ? <SettingsPage /> : null}
+            </ErrorBoundary>
+          ) : null}
         </main>
       </div>
     </div>
@@ -189,6 +245,9 @@ function AppShell() {
 }
 
 export function App() {
+  if (isLabChartView()) {
+    return <LabChartWindowPage />;
+  }
   return (
     <SessionProvider>
       <AppShell />

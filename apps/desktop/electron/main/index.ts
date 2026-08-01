@@ -3,7 +3,14 @@
  * Отвечает за окно, debug-логи на диск, SSH config apply, ключи.
  */
 
-import { app, BrowserWindow, ipcMain, shell, powerMonitor } from "electron";
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  shell,
+  powerMonitor,
+  powerSaveBlocker,
+} from "electron";
 import { join } from "path";
 import { mkdir, readFile, writeFile, copyFile, access } from "fs/promises";
 import { existsSync } from "fs";
@@ -52,7 +59,32 @@ const logger = new DebugLogger({ enabled: false });
 const erpClient = new FibbeeClient();
 
 let mainWindow: BrowserWindow | null = null;
+let labChartWindow: BrowserWindow | null = null;
+let labChartLastSync: unknown = null;
 let resumeBusy = false;
+/** Не даём ОС усыпить приложение, пока открыто окно графика (опрос в main). */
+let labPowerBlockerId: number | null = null;
+
+function setLabChartKeepAlive(on: boolean): void {
+  if (on) {
+    if (labPowerBlockerId == null) {
+      labPowerBlockerId = powerSaveBlocker.start("prevent-app-suspension");
+    }
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.setBackgroundThrottling(false);
+    }
+    if (labChartWindow && !labChartWindow.isDestroyed()) {
+      labChartWindow.webContents.setBackgroundThrottling(false);
+    }
+    return;
+  }
+  if (labPowerBlockerId != null) {
+    if (powerSaveBlocker.isStarted(labPowerBlockerId)) {
+      powerSaveBlocker.stop(labPowerBlockerId);
+    }
+    labPowerBlockerId = null;
+  }
+}
 
 function broadcast(channel: string, payload: unknown): void {
   for (const w of BrowserWindow.getAllWindows()) {
@@ -161,6 +193,23 @@ async function ensureDebugSink(enabled: boolean): Promise<void> {
   logger.info("main", "Debug log file ready", { file });
 }
 
+function loadRenderer(
+  win: BrowserWindow,
+  query?: Record<string, string>
+): void {
+  if (process.env.ELECTRON_RENDERER_URL) {
+    const u = new URL(process.env.ELECTRON_RENDERER_URL);
+    if (query) {
+      for (const [k, v] of Object.entries(query)) u.searchParams.set(k, v);
+    }
+    void win.loadURL(u.toString());
+    return;
+  }
+  void win.loadFile(join(__dirname, "../renderer/index.html"), {
+    query: query ?? {},
+  });
+}
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -174,19 +223,74 @@ function createWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      // Lab опрос живёт в main renderer; без этого при фокусе на окне
+      // графика / Discord таймеры троттлятся и график «замирает».
+      backgroundThrottling: false,
     },
   });
 
-  if (process.env.ELECTRON_RENDERER_URL) {
-    void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
-  } else {
-    void mainWindow.loadFile(join(__dirname, "../renderer/index.html"));
-  }
+  loadRenderer(mainWindow);
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);
     return { action: "deny" };
   });
+}
+
+function createLabChartWindow(focusSensor?: string | null): BrowserWindow {
+  if (labChartWindow && !labChartWindow.isDestroyed()) {
+    setLabChartKeepAlive(true);
+    labChartWindow.focus();
+    if (focusSensor) {
+      labChartWindow.webContents.send("labChart:focus", { focusSensor });
+    }
+    return labChartWindow;
+  }
+
+  labChartWindow = new BrowserWindow({
+    width: 1280,
+    height: 900,
+    minWidth: 800,
+    minHeight: 560,
+    backgroundColor: "#0f1419",
+    title: "График комплекса · Service Monitor",
+    show: true,
+    webPreferences: {
+      preload: join(__dirname, "../preload/index.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      backgroundThrottling: false,
+    },
+  });
+
+  const query: Record<string, string> = { view: "lab-chart" };
+  if (focusSensor) query.focus = focusSensor;
+
+  labChartWindow.webContents.on("did-fail-load", (_e, code, desc, url) => {
+    console.error("[labChart] did-fail-load", code, desc, url);
+  });
+  labChartWindow.webContents.on("render-process-gone", (_e, details) => {
+    console.error("[labChart] render-process-gone", details);
+  });
+
+  loadRenderer(labChartWindow, query);
+  setLabChartKeepAlive(true);
+
+  labChartWindow.on("closed", () => {
+    labChartWindow = null;
+    setLabChartKeepAlive(false);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("labChart:closed", {});
+    }
+  });
+
+  labChartWindow.webContents.setWindowOpenHandler(({ url }) => {
+    void shell.openExternal(url);
+    return { action: "deny" };
+  });
+
+  return labChartWindow;
 }
 
 function registerIpc(): void {
@@ -197,6 +301,63 @@ function registerIpc(): void {
     pubkeyFile: defaultPubkeyPath(),
     sshConfig: sshConfigPath(),
   }));
+
+  ipcMain.handle(
+    "labChart:open",
+    (_e, input?: { focusSensor?: string | null }) => {
+      try {
+        createLabChartWindow(input?.focusSensor ?? null);
+        if (labChartLastSync && labChartWindow && !labChartWindow.isDestroyed()) {
+          labChartWindow.webContents.send("labChart:state", labChartLastSync);
+        }
+        return { ok: true as const };
+      } catch (e) {
+        console.error("[labChart] open failed", e);
+        return {
+          ok: false as const,
+          error: e instanceof Error ? e.message : String(e),
+        };
+      }
+    }
+  );
+
+  ipcMain.handle("labChart:sync", (_e, payload: unknown) => {
+    labChartLastSync = payload;
+    if (labChartWindow && !labChartWindow.isDestroyed()) {
+      labChartWindow.webContents.send("labChart:state", payload);
+    }
+    return { ok: true as const };
+  });
+
+  ipcMain.handle("labChart:pull", () => labChartLastSync);
+
+  ipcMain.handle("labChart:isOpen", () => ({
+    open: Boolean(labChartWindow && !labChartWindow.isDestroyed()),
+  }));
+
+  ipcMain.handle("labChart:close", () => {
+    if (labChartWindow && !labChartWindow.isDestroyed()) {
+      labChartWindow.close();
+    }
+    return { ok: true as const };
+  });
+
+  ipcMain.handle("labChart:setFullScreen", (_e, flag: boolean) => {
+    if (!labChartWindow || labChartWindow.isDestroyed()) {
+      return { ok: false as const };
+    }
+    labChartWindow.setFullScreen(Boolean(flag));
+    return { ok: true as const, fullScreen: labChartWindow.isFullScreen() };
+  });
+
+  ipcMain.handle("labChart:toggleFullScreen", () => {
+    if (!labChartWindow || labChartWindow.isDestroyed()) {
+      return { ok: false as const };
+    }
+    const next = !labChartWindow.isFullScreen();
+    labChartWindow.setFullScreen(next);
+    return { ok: true as const, fullScreen: next };
+  });
 
   ipcMain.handle("debug:setEnabled", async (_e, enabled: boolean) => {
     await ensureDebugSink(Boolean(enabled));
@@ -607,6 +768,7 @@ function registerIpc(): void {
           ok: true as const,
           milk: data.milk,
           coffee: data.coffee,
+          water: data.water,
         };
       } catch (e) {
         const empty = {
@@ -620,25 +782,29 @@ function registerIpc(): void {
           error: e instanceof Error ? e.message : String(e),
           milk: { ...empty },
           coffee: { ...empty },
+          water: { ...empty },
         };
       }
     }
   );
-  ipcMain.handle("nats:subscribeBus", async (_e, subjects: string[]) => {
-    try {
-      const list = Array.isArray(subjects) ? subjects : [];
-      const res = await natsSubscribeBus(list);
-      return { ok: true as const, subjects: res.subjects };
-    } catch (e) {
-      return {
-        ok: false as const,
-        error: e instanceof Error ? e.message : String(e),
-      };
+  ipcMain.handle(
+    "nats:subscribeBus",
+    async (_e, subjects: string[], clientId?: string) => {
+      try {
+        const list = Array.isArray(subjects) ? subjects : [];
+        const res = await natsSubscribeBus(list, clientId ?? "default");
+        return { ok: true as const, subjects: res.subjects };
+      } catch (e) {
+        return {
+          ok: false as const,
+          error: e instanceof Error ? e.message : String(e),
+        };
+      }
     }
-  });
-  ipcMain.handle("nats:unsubscribeBus", async () => {
+  );
+  ipcMain.handle("nats:unsubscribeBus", async (_e, clientId?: string) => {
     try {
-      await natsUnsubscribeBus();
+      await natsUnsubscribeBus(clientId ?? "default");
       return { ok: true as const };
     } catch (e) {
       return {

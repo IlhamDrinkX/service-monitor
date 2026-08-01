@@ -60,6 +60,15 @@ export type LabHostPwm = Partial<
   Record<"heater1" | "heater2", TimedValue<number>>
 >;
 
+/** Per-host reachability: NATS (pump/status) vs DX HTTP (:8000 R_IS). */
+export type LabHostHealth = {
+  /** pumps.status / heaters / temps for this host */
+  natsOk: boolean | null;
+  /** DX UI HTTP → pump_R_IS present */
+  dxOk: boolean | null;
+  updatedAt: number;
+};
+
 export type LabSnapshot = {
   lastTickAt: number;
   /** Идёт сбор tick — не красить UI в stale. */
@@ -76,12 +85,19 @@ export type LabSnapshot = {
   waterPulses: TimedValue<number> | null;
   pumpOn: Partial<Record<DrinkxHost, TimedValue<boolean>>>;
   pumpPower: Partial<Record<DrinkxHost, TimedValue<number>>>;
-  pumpRis: Partial<Record<"milk" | "coffee", TimedValue<number>>>;
-  pumpLis: Partial<Record<"milk" | "coffee", TimedValue<number>>>;
+  pumpRis: Partial<Record<"milk" | "coffee" | "water", TimedValue<number>>>;
+  pumpLis: Partial<Record<"milk" | "coffee" | "water", TimedValue<number>>>;
   heaters: Partial<Record<DrinkxHost, LabHostHeaters>>;
   heaterPwm: Partial<Record<DrinkxHost, LabHostPwm>>;
   /** Active-host valve baseId → enabled */
   valves: Partial<Record<string, TimedValue<boolean>>>;
+  /**
+   * Открытые клапаны молочного холодильника (номера 1…6).
+   * Источник: status milkValves/coffeeValves/valves + bus complexos.valves.switched.
+   */
+  milkSystemOpen: TimedValue<number[]> | null;
+  /** Per milk/coffee/water: NATS vs DX split (типичный DHCP/.33 кейс). */
+  hostHealth: Partial<Record<DrinkxHost, LabHostHealth>>;
   dxUiStatus: string;
 };
 
@@ -103,6 +119,8 @@ export function emptyLabSnapshot(): LabSnapshot {
     heaters: {},
     heaterPwm: {},
     valves: {},
+    milkSystemOpen: null,
+    hostHealth: {},
     dxUiStatus: "",
   };
 }

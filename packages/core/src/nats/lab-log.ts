@@ -88,25 +88,54 @@ function csvEscape(s: string): string {
   return s;
 }
 
-/** Точки датчика: key = `milk.input` или короткое `input`. */
+/**
+ * Точки датчика: key = `milk.input` или короткое `input`.
+ * Учитывает значение до окна since (hold) и тянет последнюю точку до untilMs,
+ * иначе слева окна пусто при редких сэмплах.
+ */
 export function sensorSeries(
   events: LabEvent[],
   sensorName: string,
-  limit = 120,
-  sinceMs?: number | null
+  limit = 2000,
+  sinceMs?: number | null,
+  untilMs?: number | null
 ): Array<{ t: number; v: number }> {
-  const pts: Array<{ t: number; v: number }> = [];
-  const since = sinceMs ?? null;
+  const matching: Array<{ t: number; v: number }> = [];
   for (const e of events) {
     if (!eventMatchesSeries(e, sensorName, "sensor")) continue;
     const t = Date.parse(e.at);
     if (!Number.isFinite(t)) continue;
-    if (since != null && t < since) continue;
     const n = typeof e.value === "number" ? e.value : Number(e.value);
     if (!Number.isFinite(n)) continue;
-    pts.push({ t, v: n });
+    matching.push({ t, v: n });
   }
-  return pts.slice(-limit);
+  if (matching.length === 0) return [];
+
+  const since = sinceMs ?? null;
+  const until = untilMs ?? null;
+  let baseline: { t: number; v: number } | null = null;
+  const inWindow: Array<{ t: number; v: number }> = [];
+  for (const p of matching) {
+    if (since != null && p.t < since) {
+      baseline = p;
+      continue;
+    }
+    if (until != null && p.t > until) continue;
+    inWindow.push(p);
+  }
+
+  const pts: Array<{ t: number; v: number }> = [];
+  if (baseline != null && since != null) {
+    pts.push({ t: since, v: baseline.v });
+  }
+  for (const p of inWindow) pts.push(p);
+  if (pts.length === 0) return [];
+
+  if (until != null) {
+    const last = pts[pts.length - 1]!;
+    if (last.t < until) pts.push({ t: until, v: last.v });
+  }
+  return pts.length > limit ? pts.slice(-limit) : pts;
 }
 
 /** Окно времени для масштаба графика. */
@@ -128,25 +157,45 @@ export function chartSinceMs(
 /**
  * Step-series для клапанов / насоса / ТЭНов.
  * `name` может быть `drain` или `milk.drain`.
+ * Учитывает состояние до окна since (иначе «ON до зума» пропадает) и тянет
+ * последнюю ступеньку до now (иначе одна точка невидима).
  */
 export function booleanStepSeries(
   events: LabEvent[],
   kind: LabEventKind,
   name: string,
   sinceMs?: number | null,
-  limit = 400
+  limit = 2000,
+  nowMs = Date.now()
 ): Array<{ t: number; v: number }> {
-  const raw: Array<{ t: number; v: number }> = [];
-  const since = sinceMs ?? null;
+  const matching: Array<{ t: number; v: number }> = [];
   for (const e of events) {
     if (!eventMatchesSeries(e, name, kind)) continue;
     if (e.value !== true && e.value !== false) continue;
     const t = Date.parse(e.at);
     if (!Number.isFinite(t)) continue;
-    if (since != null && t < since) continue;
-    raw.push({ t, v: e.value ? 1 : 0 });
+    matching.push({ t, v: e.value ? 1 : 0 });
   }
+  if (matching.length === 0) return [];
+
+  const since = sinceMs ?? null;
+  let baseline: { t: number; v: number } | null = null;
+  const inWindow: Array<{ t: number; v: number }> = [];
+  for (const p of matching) {
+    if (since != null && p.t < since) {
+      baseline = p;
+      continue;
+    }
+    inWindow.push(p);
+  }
+
+  const raw: Array<{ t: number; v: number }> = [];
+  if (baseline != null && since != null) {
+    raw.push({ t: since, v: baseline.v });
+  }
+  for (const p of inWindow) raw.push(p);
   if (raw.length === 0) return [];
+
   const stepped: Array<{ t: number; v: number }> = [
     { t: raw[0]!.t, v: raw[0]!.v },
   ];
@@ -158,6 +207,10 @@ export function booleanStepSeries(
     }
     stepped.push(cur);
   }
+  const last = stepped[stepped.length - 1]!;
+  if (nowMs > last.t) {
+    stepped.push({ t: nowMs, v: last.v });
+  }
   return stepped.slice(-limit);
 }
 
@@ -165,17 +218,19 @@ export function booleanStepSeries(
 export function pumpPowerSeries(
   events: LabEvent[],
   sinceMs?: number | null,
-  limit = 200,
-  module?: string | null
+  limit = 2000,
+  module?: string | null,
+  untilMs?: number | null
 ): Array<{ t: number; v: number }> {
-  const pts: Array<{ t: number; v: number }> = [];
+  const matching: Array<{ t: number; v: number }> = [];
   const since = sinceMs ?? null;
+  const until = untilMs ?? null;
+  let baseline: { t: number; v: number } | null = null;
   for (const e of events) {
     if (e.kind !== "pump" || e.name !== "pump") continue;
     if (module && e.module !== module) continue;
     const t = Date.parse(e.at);
     if (!Number.isFinite(t)) continue;
-    if (since != null && t < since) continue;
     let power: number | null = null;
     if (e.value === false || e.value === 0) {
       power = 0;
@@ -186,8 +241,18 @@ export function pumpPowerSeries(
       if (m) power = Number(m[1]);
     }
     if (power == null || !Number.isFinite(power)) continue;
-    pts.push({ t, v: power });
+    if (since != null && t < since) {
+      baseline = { t, v: power };
+      continue;
+    }
+    if (until != null && t > until) continue;
+    matching.push({ t, v: power });
   }
+  const pts: Array<{ t: number; v: number }> = [];
+  if (baseline != null && since != null) {
+    pts.push({ t: since, v: baseline.v });
+  }
+  for (const p of matching) pts.push(p);
   if (pts.length === 0) return [];
   const stepped: Array<{ t: number; v: number }> = [
     { t: pts[0]!.t, v: pts[0]!.v },
@@ -198,7 +263,11 @@ export function pumpPowerSeries(
     stepped.push({ t: cur.t, v: prev.v });
     stepped.push(cur);
   }
-  return stepped.slice(-limit);
+  if (until != null) {
+    const last = stepped[stepped.length - 1]!;
+    if (last.t < until) stepped.push({ t: until, v: last.v });
+  }
+  return stepped.length > limit ? stepped.slice(-limit) : stepped;
 }
 
 export type ChartSeriesMeta = {
@@ -385,7 +454,12 @@ export function complexSensorCatalog(): string[] {
     seriesKey("water", "waterPressure"),
     seriesKey("water", "waterTotalPulses"),
     seriesKey("water", "heater1_out"),
-    seriesKey("water", "heater2_out")
+    seriesKey("water", "heater2_out"),
+    seriesKey("water", "heater1_pwm"),
+    seriesKey("water", "heater2_pwm"),
+    seriesKey("water", "pumpCurrent"),
+    seriesKey("water", "pumpCurrentL"),
+    seriesKey("water", "pumpPower")
   );
   return keys;
 }

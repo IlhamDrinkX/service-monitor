@@ -16,6 +16,8 @@ import {
   HEATER_WARMUP_DEFAULTS,
   MODULE_VALVES,
   NATS_SUBJECTS,
+  COMPLEXOS_SUBJECTS,
+  MILK_SYSTEM_VALVE_IDS,
   TEMP_SENSOR_LABELS,
   VALVE_LABELS,
   VALVE_PACKAGES,
@@ -35,10 +37,15 @@ import {
   heaterStopSubject,
   isTelemetryStale,
   labEventsToCsv,
+  milkSystemValveId,
+  milkSystemValveHwIndex,
   milkSystemValveNumbers,
+  natsReplyIsError,
+  mergeOpenValveNumbers,
   pumpCommandPayload,
   pumpCommandSubject,
   pumpStopSubject,
+  parseSeriesKey,
   seriesKey,
   STALE_MS,
   valveCommandSubject,
@@ -64,7 +71,10 @@ import {
 } from "@service-monitor/core";
 import { ActionButton } from "../components/ActionButton";
 import { HelpTip } from "../components/HelpTip";
-import { ModulesLabCharts } from "../components/ModulesLabCharts";
+import {
+  ModulesLabCharts,
+  openLabChartLogViewer,
+} from "../components/ModulesLabCharts";
 import { useLabTelemetry } from "../lab/useLabTelemetry";
 import { onEnterNavigate } from "../lib/form-nav";
 import { smLog } from "../lib/sm-log";
@@ -272,10 +282,10 @@ export function ModulesPage() {
     Partial<Record<DrinkxHost, Partial<Record<TempSensorKey, number>>>>
   >({});
   const [pumpCurrentByHost, setPumpCurrentByHost] = useState<
-    Partial<Record<"milk" | "coffee", number | null>>
+    Partial<Record<"milk" | "coffee" | "water", number | null>>
   >({});
   const [pumpCurrentLByHost, setPumpCurrentLByHost] = useState<
-    Partial<Record<"milk" | "coffee", number | null>>
+    Partial<Record<"milk" | "coffee" | "water", number | null>>
   >({});
   const [heaterPwmByHost, setHeaterPwmByHost] = useState<
     Partial<Record<"milk" | "coffee" | "water", Partial<Record<string, number>>>>
@@ -355,6 +365,8 @@ export function ModulesPage() {
   const pumpTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const commandLock = useRef(Promise.resolve());
   const lastSensorLog = useRef<Record<string, number>>({});
+  /** Последнее залогированное состояние клапанов (DX + ms) → история графиков. */
+  const lastValveLog = useRef<Record<string, boolean>>({});
   const valvePkgAbort = useRef<AbortController | null>(null);
   const warmupAbort = useRef<AbortController | null>(null);
   /** Не затирать состояние клапана опросом сразу после команды. */
@@ -406,7 +418,8 @@ export function ModulesPage() {
       });
       setLabEvents((prev) => {
         const next = [...prev, ev];
-        return next.length > 4000 ? next.slice(-4000) : next;
+        // ~15+ мин при нескольких датчиках ~1 Гц + актуаторы
+        return next.length > 30_000 ? next.slice(-30_000) : next;
       });
     },
     []
@@ -583,7 +596,7 @@ export function ModulesPage() {
 
     setPumpCurrentByHost((prev) => {
       const next = { ...prev };
-      for (const mod of ["milk", "coffee"] as const) {
+      for (const mod of ["milk", "coffee", "water"] as const) {
         const v = labSnap.pumpRis[mod];
         if (v) next[mod] = v.value;
       }
@@ -591,13 +604,13 @@ export function ModulesPage() {
     });
     setPumpCurrentLByHost((prev) => {
       const next = { ...prev };
-      for (const mod of ["milk", "coffee"] as const) {
+      for (const mod of ["milk", "coffee", "water"] as const) {
         const v = labSnap.pumpLis[mod];
         if (v) next[mod] = v.value;
       }
       return next;
     });
-    for (const mod of ["milk", "coffee"] as const) {
+    for (const mod of ["milk", "coffee", "water"] as const) {
       const r = labSnap.pumpRis[mod];
       const l = labSnap.pumpLis[mod];
       if (r) pushSensorSample(mod, "pumpCurrent", r.value, 0.01);
@@ -606,19 +619,111 @@ export function ModulesPage() {
 
     if (labSnap.dxUiStatus) setDxUiStatus(labSnap.dxUiStatus);
 
+    // DX клапаны всех модулей → UI активного + история ON/OFF для графиков
     setValves((prev) => {
       const next = { ...prev };
       const now = Date.now();
-      const allowed = new Set(MODULE_VALVES[hostRef.current]);
-      for (const [baseId, tv] of Object.entries(labSnap.valves)) {
-        if (!allowed.has(baseId)) continue;
-        const hold = valveHoldUntil.current.get(baseId) ?? 0;
+      const host = hostRef.current;
+      for (const baseId of MODULE_VALVES[host]) {
+        const key = seriesKey(host, baseId);
+        const tv = labSnap.valves[key] ?? labSnap.valves[baseId];
+        if (!tv) continue;
+        const hold =
+          valveHoldUntil.current.get(key) ??
+          valveHoldUntil.current.get(baseId) ??
+          0;
         if (hold > now) continue;
-        if (tv) next[baseId] = tv.value;
+        next[baseId] = tv.value;
       }
       return next;
     });
-  }, [live, labSnap, pushSensorSample]);
+    for (const [key, tv] of Object.entries(labSnap.valves)) {
+      if (!tv) continue;
+      const parsed = parseSeriesKey(key);
+      const mod =
+        parsed.module === "milk" ||
+        parsed.module === "coffee" ||
+        parsed.module === "water"
+          ? parsed.module
+          : hostRef.current;
+      const baseId = parsed.module ? parsed.name : key;
+      const logKey = seriesKey(mod, baseId);
+      const prev = lastValveLog.current[logKey];
+      if (prev === tv.value) continue;
+      lastValveLog.current[logKey] = tv.value;
+      pushLab("valve", baseId, tv.value, `poll ${tv.source}`, mod);
+    }
+
+    // Молочные клапана холодильника (1…6)
+    if (labSnap.milkSystemOpen) {
+      const open = new Set(labSnap.milkSystemOpen.value);
+      setMilkValves((prev) => {
+        const next: EnabledMap = { ...prev };
+        for (let n = 1; n <= 6; n++) {
+          next[String(n)] = open.has(n);
+        }
+        return next;
+      });
+      for (let n = 1; n <= 6; n++) {
+        const id = milkSystemValveId(n)!;
+        const on = open.has(n);
+        const logKey = seriesKey("milk", id);
+        if (lastValveLog.current[logKey] === on) continue;
+        lastValveLog.current[logKey] = on;
+        pushLab("valve", id, on, `ms ${labSnap.milkSystemOpen.source}`, "milk");
+      }
+    }
+  }, [live, labSnap, pushSensorSample, pushLab]);
+
+  // complexos.valves.switched — live во время brew с киоска
+  useEffect(() => {
+    if (!live) {
+      void window.desktop.natsUnsubscribeBus?.("lab");
+      return;
+    }
+    let cancelled = false;
+    void window.desktop
+      .natsSubscribeBus?.([COMPLEXOS_SUBJECTS.valvesSwitched], "lab")
+      .catch((e) => console.warn("[modules] valves bus", e));
+    const off =
+      typeof window.desktop.onNatsBus === "function"
+        ? window.desktop.onNatsBus((msg) => {
+            if (cancelled) return;
+            if (msg.subject !== COMPLEXOS_SUBJECTS.valvesSwitched) return;
+            const data = msg.data as { valves?: unknown; nozzleId?: unknown };
+            const raw = Array.isArray(data?.valves)
+              ? data.valves.map((x) => Number(x)).filter((n) => Number.isFinite(n))
+              : [];
+            const open = mergeOpenValveNumbers(raw);
+            labTelemetryRef.current?.setMilkSystemOpen(open, "nats");
+            // Immediate UI (snap tick may lag)
+            setMilkValves(() => {
+              const next: EnabledMap = {};
+              for (let n = 1; n <= 6; n++) next[String(n)] = open.includes(n);
+              return next;
+            });
+            for (let n = 1; n <= 6; n++) {
+              const id = milkSystemValveId(n)!;
+              const on = open.includes(n);
+              const logKey = seriesKey("milk", id);
+              if (lastValveLog.current[logKey] === on) continue;
+              lastValveLog.current[logKey] = on;
+              pushLab(
+                "valve",
+                id,
+                on,
+                `bus nozzle=${String(data?.nozzleId ?? "?")}`,
+                "milk"
+              );
+            }
+          })
+        : () => undefined;
+    return () => {
+      cancelled = true;
+      off();
+      void window.desktop.natsUnsubscribeBus?.("lab");
+    };
+  }, [live, pushLab, labTelemetryRef]);
 
   const refreshDevices = useCallback(() => {
     labTelemetryRef.current?.kick();
@@ -638,9 +743,8 @@ export function ModulesPage() {
     setValves({});
     setPumpOn(null);
     setHeaters({});
-    setMilkValves({});
+    // milkSystem valves — комплексные, не сбрасываем при смене host
     setTemps({});
-    // complexTemps / pressure / pulses — не сбрасываем (комплекс).
     setCalibRows(FLOW_CALIBRATION_QTYS.map((qty) => ({ qty })));
     setCalibLog("");
     setCalibStatus("");
@@ -960,62 +1064,70 @@ export function ModulesPage() {
 
   async function toggleValve(baseId: string) {
     const next = !(valves[baseId] === true);
+    const host = hostRef.current;
+    const vKey = seriesKey(host, baseId);
     setBusy(`valve-${baseId}`);
     // Оптимистично + hold 4с — poll не должен гасить лампу до verify.
     setValves((v) => ({ ...v, [baseId]: next }));
-    valveHoldUntil.current.set(baseId, Date.now() + 4_000);
-    labTelemetryRef.current?.setValve(baseId, next);
-    pushLab("valve", baseId, next, next ? "cmd open" : "cmd close");
+    valveHoldUntil.current.set(vKey, Date.now() + 4_000);
+    labTelemetryRef.current?.setValve(vKey, next);
+    pushLab("valve", baseId, next, next ? "cmd open" : "cmd close", host);
     try {
       await withCommandLock(async () => {
         const res = await ensureValve(baseId, next);
         if (res.enabled !== undefined) {
           setValves((v) => ({ ...v, [baseId]: res.enabled! }));
-          labTelemetryRef.current?.setValve(baseId, res.enabled!);
-          valveHoldUntil.current.set(baseId, Date.now() + 4_000);
+          labTelemetryRef.current?.setValve(vKey, res.enabled!);
+          valveHoldUntil.current.set(vKey, Date.now() + 4_000);
         }
         if (!res.ok) {
-          pushLab("valve", baseId, res.enabled ?? null, res.error || "verify failed");
+          pushLab(
+            "valve",
+            baseId,
+            res.enabled ?? null,
+            res.error || "verify failed",
+            host
+          );
           setToast({
             text: res.error || `Клапан ${baseId}: не подтверждён`,
             error: true,
           });
           if (res.enabled === undefined) {
             const st = await req(
-              valveStatusSubject(hostRef.current, baseId),
+              valveStatusSubject(host, baseId),
               {},
               700,
               "command"
             );
             const got = st.ok ? extractEnabledState(st.data) : null;
-            if (got !== null) {
+            if (got != null) {
               setValves((v) => ({ ...v, [baseId]: got }));
-              labTelemetryRef.current?.setValve(baseId, got);
-              valveHoldUntil.current.set(baseId, Date.now() + 2_000);
+              labTelemetryRef.current?.setValve(vKey, got);
+              valveHoldUntil.current.set(vKey, Date.now() + 2_000);
             } else {
-              valveHoldUntil.current.delete(baseId);
+              valveHoldUntil.current.delete(vKey);
             }
           }
         } else {
-          pushLab("valve", baseId, res.enabled ?? next, "verified");
+          pushLab("valve", baseId, res.enabled ?? next, "verified", host);
         }
       });
-    } catch (e) {
-      setToast({ text: errText(e), error: true });
-      valveHoldUntil.current.delete(baseId);
     } finally {
+      valveHoldUntil.current.delete(vKey);
       setBusy(null);
     }
   }
 
   async function setAllValves(enabled: boolean) {
+    const host = hostRef.current;
     setBusy("valves-all");
     setValves((prev) => {
       const next = { ...prev };
       for (const id of MODULE_VALVES[host]) {
         next[id] = enabled;
-        valveHoldUntil.current.set(id, Date.now() + 4_000);
-        labTelemetryRef.current?.setValve(id, enabled);
+        const vKey = seriesKey(host, id);
+        valveHoldUntil.current.set(vKey, Date.now() + 4_000);
+        labTelemetryRef.current?.setValve(vKey, enabled);
       }
       return next;
     });
@@ -1493,21 +1605,60 @@ export function ModulesPage() {
   async function toggleMilkValve(valveNumber: number) {
     const key = String(valveNumber);
     const next = !(milkValves[key] === true);
+    const id = milkSystemValveId(valveNumber);
+    const hwIndex = milkSystemValveHwIndex(valveNumber);
+    if (hwIndex == null || !id) return;
     setBusy(`milk-v-${valveNumber}`);
     setMilkValves((m) => ({ ...m, [key]: next }));
+    pushLab("valve", id, next, next ? "cmd open" : "cmd close", "milk");
+    lastValveLog.current[seriesKey("milk", id)] = next;
+    const openNow = milkSystemValveNumbers()
+      .map((v) => v.valveNumber)
+      .filter((n) =>
+        n === valveNumber ? next : milkValves[String(n)] === true
+      );
+    labTelemetryRef.current?.setMilkSystemOpen(openNow, "cmd");
+
+    const revert = () => {
+      setMilkValves((m) => ({ ...m, [key]: !next }));
+      pushLab("valve", id, !next, "cmd revert", "milk");
+      lastValveLog.current[seriesKey("milk", id)] = !next;
+      const openRevert = milkSystemValveNumbers()
+        .map((v) => v.valveNumber)
+        .filter((n) =>
+          n === valveNumber ? !next : milkValves[String(n)] === true
+        );
+      labTelemetryRef.current?.setMilkSystemOpen(openRevert, "cmd");
+    };
+
     try {
       await withCommandLock(async () => {
         const subject = next
           ? "coffeemachine.debug-valves-on"
           : "coffeemachine.debug-valves-off";
-        const res = await req(subject, { nozzleId: 0, valves: [valveNumber] });
-        if (!res.ok) {
-          setToast({ text: res.error, error: true });
-          setMilkValves((m) => ({ ...m, [key]: !next }));
+        // ERP: milk-N.valves = [N]; debug-valves / bus используют тот же номер (не N-1).
+        const res = await req(subject, { nozzleId: 0, valves: [hwIndex] });
+        const body = res.ok ? res.data : null;
+        const failed = !res.ok || natsReplyIsError(body);
+        if (failed) {
+          const errMsg = !res.ok
+            ? String(res.error)
+            : String(
+                (body &&
+                  typeof body === "object" &&
+                  (body as { result?: unknown }).result) ??
+                  "error"
+              );
+          setToast({
+            text: `${errMsg} · на dx-facade debug-valves часто Not implemented; live — bus complexos.valves.switched при brew`,
+            error: true,
+          });
+          revert();
         }
       });
     } catch (e) {
       setToast({ text: errText(e), error: true });
+      revert();
     } finally {
       setBusy(null);
     }
@@ -2010,11 +2161,44 @@ export function ModulesPage() {
     events: labEvents,
     availableSensors: availableChartSensors,
     valveIdsByModule: {
-      milk: MODULE_VALVES.milk,
+      milk: [...MODULE_VALVES.milk, ...MILK_SYSTEM_VALVE_IDS],
       coffee: MODULE_VALVES.coffee,
       water: MODULE_VALVES.water,
     } as Record<DrinkxHost, string[]>,
     heaterIds: [...HEATER_IDS],
+    liveActuators: (() => {
+      const valvesLive: Record<string, boolean> = {};
+      for (const [key, tv] of Object.entries(labSnap.valves)) {
+        if (!tv) continue;
+        const parsed = parseSeriesKey(key);
+        if (parsed.module) {
+          valvesLive[key] = tv.value === true;
+        } else {
+          valvesLive[seriesKey(host, key)] = tv.value === true;
+        }
+      }
+      for (const [id, on] of Object.entries(valves)) {
+        if (on == null) continue;
+        valvesLive[seriesKey(host, id)] = on === true;
+      }
+      for (let n = 1; n <= 6; n++) {
+        const v = milkValves[String(n)];
+        if (v == null) continue;
+        valvesLive[seriesKey("milk", `msValve${n}`)] = v === true;
+      }
+      for (const e of labEvents) {
+        if (e.kind !== "valve") continue;
+        if (e.value !== true && e.value !== false) continue;
+        valvesLive[seriesKey(e.module, e.name)] = e.value;
+      }
+      const pumpsLive: Partial<Record<DrinkxHost, boolean>> = {};
+      for (const mod of DRINKX_HOSTS) {
+        const tv = labSnap.pumpOn[mod];
+        if (tv) pumpsLive[mod] = tv.value;
+      }
+      if (pumpOn != null) pumpsLive[host] = pumpOn;
+      return { valves: valvesLive, pumps: pumpsLive };
+    })(),
   };
 
   function exportLabLog() {
@@ -2365,6 +2549,19 @@ export function ModulesPage() {
             {showCharts ? "Графики▾" : "Графики"}
           </ActionButton>
           <ActionButton
+            helpId="modules.chartLog"
+            className="btn-compact"
+            onClick={() => {
+              void openLabChartLogViewer().then((res) => {
+                if (!res.ok) {
+                  window.alert(res.error || "Не удалось открыть окно графика");
+                }
+              });
+            }}
+          >
+            Лог графика
+          </ActionButton>
+          <ActionButton
             helpId="modules.tracks"
             className="btn-compact"
             onClick={() => setShowTrackPanel((v) => !v)}
@@ -2405,6 +2602,28 @@ export function ModulesPage() {
               ))}
             </select>
           </label>
+          {live
+            ? DRINKX_HOSTS.map((h) => {
+                const hh = labSnap.hostHealth[h];
+                const nats = hh?.natsOk;
+                const dx = hh?.dxOk;
+                const bothOk = nats === true && dx === true;
+                const anyFail = nats === false || dx === false;
+                const natsLabel =
+                  nats === true ? "NATS ok" : nats === false ? "NATS fail" : "NATS ?";
+                const dxLabel =
+                  dx === true ? "DX ok" : dx === false ? "DX fail" : "DX ?";
+                return (
+                  <span
+                    key={`health-${h}`}
+                    className={`badge${bothOk ? " on" : anyFail ? " danger" : ""}`}
+                    title={`${h}: NATS (pumps/status) · DX HTTP :8000 R_IS`}
+                  >
+                    {h} · {natsLabel} · {dxLabel}
+                  </span>
+                );
+              })
+            : null}
           <label className="muted lab-select">
             hwid
             <HelpTip controlId="modules.hwid" />
@@ -2507,15 +2726,23 @@ export function ModulesPage() {
 
       <div className="lab-grid">
         <div className="lab-col">
-      {host === "milk" ? (
         <div className="panel panel-compact">
-          <h2>Молочные клапана</h2>
+          <h2 className="row" style={{ gap: 8, alignItems: "center" }}>
+            Молочные клапана
+            <HelpTip controlId="modules.milkValves" />
+          </h2>
+          <p className="muted" style={{ marginTop: 0, fontSize: 11 }}>
+            Холодильник · номер N = milk-N / bus valves [N]. Live из{" "}
+            <code>complexos.valves.switched</code> при brew. На dx-facade
+            debug-valves часто Not implemented — кнопка тогда откатывается.
+            Жёлтая лампа = ещё не было события.
+          </p>
           <div className="device-list">
             {milkSystemValveNumbers().map((v) => (
               <ToggleRow
                 key={v.valveNumber}
                 label={v.label}
-                code={`valve${v.valveNumber}`}
+                code={v.id}
                 on={milkValves[String(v.valveNumber)] ?? null}
                 disabled={controlsDisabled}
                 onToggle={() => void toggleMilkValve(v.valveNumber)}
@@ -2523,7 +2750,6 @@ export function ModulesPage() {
             ))}
           </div>
         </div>
-      ) : null}
 
       <div className="panel panel-compact">
         <h2>Клапаны · {host}</h2>
@@ -3193,6 +3419,11 @@ export function ModulesPage() {
               };
             });
             if (mod === "water") {
+              const pwm1 = heaterPwmByHost[mod]?.heater1;
+              const pwm2 = heaterPwmByHost[mod]?.heater2;
+              const cur = pumpCurrentByHost[mod];
+              const curL = pumpCurrentLByHost[mod];
+              const pow = pumpPowerByHost[mod];
               rows.push(
                 {
                   key: seriesKey("water", "waterPressure"),
@@ -3214,6 +3445,49 @@ export function ModulesPage() {
                     seriesKey("water", "waterTotalPulses")
                   ),
                   stale: waterPulses != null && pollStale,
+                },
+                {
+                  key: seriesKey(mod, "pumpCurrent"),
+                  label: "Насос R_IS",
+                  value: cur != null ? `${cur.toFixed(3)} V` : "—",
+                  muted: mutedSensorKeys.includes(
+                    seriesKey(mod, "pumpCurrent")
+                  ),
+                  stale: cur != null && pollStale,
+                },
+                {
+                  key: seriesKey(mod, "pumpCurrentL"),
+                  label: "Насос L_IS",
+                  value: curL != null ? `${curL.toFixed(3)} V` : "—",
+                  muted: mutedSensorKeys.includes(
+                    seriesKey(mod, "pumpCurrentL")
+                  ),
+                  stale: curL != null && pollStale,
+                },
+                {
+                  key: seriesKey(mod, "pumpPower"),
+                  label: "Насос мощность",
+                  value: pow != null ? `${pow} %` : "—",
+                  muted: mutedSensorKeys.includes(seriesKey(mod, "pumpPower")),
+                  stale: pow != null && actStale,
+                },
+                {
+                  key: seriesKey(mod, "heater1_pwm"),
+                  label: "Тэн 1 ШИМ",
+                  value: pwm1 != null ? `${pwm1.toFixed(0)} %` : "—",
+                  muted: mutedSensorKeys.includes(
+                    seriesKey(mod, "heater1_pwm")
+                  ),
+                  stale: pwm1 != null && actStale,
+                },
+                {
+                  key: seriesKey(mod, "heater2_pwm"),
+                  label: "Тэн 2 ШИМ",
+                  value: pwm2 != null ? `${pwm2.toFixed(0)} %` : "—",
+                  muted: mutedSensorKeys.includes(
+                    seriesKey(mod, "heater2_pwm")
+                  ),
+                  stale: pwm2 != null && actStale,
                 }
               );
             }

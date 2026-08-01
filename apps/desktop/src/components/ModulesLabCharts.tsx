@@ -1,57 +1,60 @@
 /**
- * Графики Modules Lab: комплекс milk/coffee/water, enlarge, маркер-срез.
+ * Мини-графики Modules Lab + открытие отдельного окна «График комплекса».
+ * Fallback: модалка, если IPC labChart ещё не в preload (нужен рестарт Electron).
  */
 
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  useEffect,
-  useMemo,
-  useState,
-  type Dispatch,
-  type SetStateAction,
-} from "react";
-import {
-  DRINKX_HOSTS,
-  HEATER_LABELS,
-  VALVE_LABELS,
-  booleanStepSeries,
   chartSeriesMeta,
-  chartSinceMs,
   layoutModuleChartKeys,
   moduleChartColumns,
   parseSeriesKey,
   pumpPowerSeries,
   sensorSeries,
   seriesKey,
-  snapshotAt,
-  type ChartTimeScale,
   type DrinkxHost,
   type LabEvent,
-  type LabSnapshotRow,
 } from "@service-monitor/core";
+import {
+  EMPTY_LAB_CHART_PAYLOAD,
+  LabChartPanel,
+  type LabChartSyncPayload,
+} from "./LabChartPanel";
 
-const SERIES_COLORS = [
-  "#3db8a8",
-  "#e8a838",
-  "#6ea8fe",
-  "#e87a9a",
-  "#a78bfa",
-  "#84cc16",
-  "#f97316",
-  "#22d3ee",
-];
+export { EMPTY_LAB_CHART_PAYLOAD };
 
-const ACTUATOR_COLORS = [
-  "#94a3b8",
-  "#64748b",
-  "#cbd5e1",
-  "#78716c",
-  "#a8a29e",
-  "#71717a",
-  "#52525b",
-  "#eab308",
-];
-
-type YScale = "auto" | "0-5" | "0-100" | "0-120";
+/**
+ * Открыть окно графика для просмотра/импорта лога без живой сессии.
+ * Пустой payload — «Импорт лога»; если в main уже есть последний sync — подтянется.
+ */
+export async function openLabChartLogViewer(): Promise<{
+  ok: boolean;
+  error?: string;
+}> {
+  if (typeof window.desktop.openLabChartWindow !== "function") {
+    return {
+      ok: false,
+      error:
+        "IPC labChart недоступен — нужен рестарт приложения.",
+    };
+  }
+  try {
+    const current = await window.desktop.pullLabChartState?.();
+    if (!current || typeof current !== "object") {
+      await window.desktop.syncLabChartState?.(EMPTY_LAB_CHART_PAYLOAD);
+    }
+    const res = await window.desktop.openLabChartWindow({});
+    if (res && "ok" in res && res.ok === false) {
+      return { ok: false, error: res.error || "Не удалось открыть окно" };
+    }
+    return { ok: true };
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+}
 
 type Props = {
   events: LabEvent[];
@@ -61,9 +64,42 @@ type Props = {
   /** @deprecated use valveIdsByModule */
   valveIds?: string[];
   heaterIds?: string[];
-  /** Мини-карточки сгруппировать по milk/coffee/water */
   groupByModule?: boolean;
+  liveActuators?: LabChartSyncPayload["liveActuators"];
 };
+
+/** Синхронизация в окно графика: хватает на 15+ мин многоканальной сессии. */
+const SYNC_MAX_EVENTS = 30_000;
+
+function buildSyncPayload(
+  events: LabEvent[],
+  allSensors: string[],
+  focus: string | null,
+  valvesMap: Record<DrinkxHost, string[]>,
+  heaterIds: string[],
+  liveActuators?: LabChartSyncPayload["liveActuators"]
+): LabChartSyncPayload {
+  // Клапаны/насосы не выкидывать при обрезке — иначе оверлеи пустые.
+  const actuators = events.filter(
+    (e) => e.kind === "valve" || e.kind === "pump" || e.kind === "heater"
+  );
+  const rest = events.filter(
+    (e) => e.kind !== "valve" && e.kind !== "pump" && e.kind !== "heater"
+  );
+  const keepAct = actuators.slice(-8_000);
+  const keepRest = rest.slice(-(SYNC_MAX_EVENTS - keepAct.length));
+  const trimmed = [...keepAct, ...keepRest].sort(
+    (a, b) => Date.parse(a.at) - Date.parse(b.at)
+  );
+  return {
+    events: trimmed,
+    allSensors,
+    initialSensor: focus,
+    valvesMap,
+    heaterIds,
+    liveActuators,
+  };
+}
 
 export function ModulesLabCharts({
   events,
@@ -73,9 +109,13 @@ export function ModulesLabCharts({
   valveIds = [],
   heaterIds = [],
   groupByModule = false,
+  liveActuators,
 }: Props) {
-  const [expanded, setExpanded] = useState(false);
+  const [chartOpen, setChartOpen] = useState(false);
+  const [modalFallback, setModalFallback] = useState(false);
   const [focus, setFocus] = useState<string | null>(null);
+  const [openError, setOpenError] = useState<string | null>(null);
+  const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const valvesMap = useMemo(() => {
     if (valveIdsByModule) return valveIdsByModule;
@@ -114,23 +154,166 @@ export function ModulesLabCharts({
     return map;
   }, [groupByModule, sensorNames]);
 
-  if (sensorNames.length === 0 && !expanded) {
+  async function openChart(sensor: string | null) {
+    setFocus(sensor);
+    setOpenError(null);
+    const payload = buildSyncPayload(
+      events,
+      allSensors,
+      sensor,
+      valvesMap,
+      heaterIds,
+      liveActuators
+    );
+
+    if (typeof window.desktop.openLabChartWindow !== "function") {
+      setModalFallback(true);
+      setOpenError(
+        "IPC labChart недоступен — нужен рестарт приложения. Открыл встроенный просмотр."
+      );
+      return;
+    }
+
+    try {
+      await window.desktop.syncLabChartState(payload);
+      const res = await window.desktop.openLabChartWindow({
+        focusSensor: sensor,
+      });
+      if (res && "ok" in res && res.ok === false) {
+        setModalFallback(true);
+        setOpenError(res.error || "Не удалось открыть окно");
+        return;
+      }
+      setChartOpen(true);
+      setModalFallback(false);
+    } catch (e) {
+      setModalFallback(true);
+      setOpenError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  useEffect(() => {
+    const offClosed = window.desktop.onLabChartClosed?.(() => {
+      setChartOpen(false);
+    });
+    void window.desktop.labChartIsOpen?.().then((r) => {
+      if (r?.open) setChartOpen(true);
+    });
+    return () => offClosed?.();
+  }, []);
+
+  useEffect(() => {
+    if (!chartOpen) return;
+    if (syncTimer.current) clearTimeout(syncTimer.current);
+    syncTimer.current = setTimeout(() => {
+      const payload = buildSyncPayload(
+        events,
+        allSensors,
+        focus,
+        valvesMap,
+        heaterIds,
+        liveActuators
+      );
+      void window.desktop.syncLabChartState?.(payload);
+    }, 400);
+    return () => {
+      if (syncTimer.current) clearTimeout(syncTimer.current);
+    };
+  }, [chartOpen, events, allSensors, focus, valvesMap, heaterIds, liveActuators]);
+
+  /** Heartbeat: даже если React не пересоздал events, подтягиваем срез в окно. */
+  useEffect(() => {
+    if (!chartOpen) return;
+    const id = setInterval(() => {
+      const payload = buildSyncPayload(
+        events,
+        allSensors,
+        focus,
+        valvesMap,
+        heaterIds,
+        liveActuators
+      );
+      void window.desktop.syncLabChartState?.(payload);
+    }, 1500);
+    return () => clearInterval(id);
+  }, [chartOpen, events, allSensors, focus, valvesMap, heaterIds, liveActuators]);
+
+  if (sensorNames.length === 0) {
     return (
-      <p className="muted" style={{ margin: 0 }}>
-        Нет точек датчиков — подождите опрос комплекса или включите треки.
-      </p>
+      <div className="stack" style={{ gap: 8 }}>
+        <p className="muted" style={{ margin: 0 }}>
+          Нет точек датчиков — подождите опрос комплекса, включите треки или
+          откройте сохранённый лог.
+        </p>
+        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => void openChart(null)}
+          >
+            Открыть лог графика
+          </button>
+          <span className="muted" style={{ fontSize: "0.8rem" }}>
+            без сессии · «Импорт лога» в окне
+          </span>
+          {openError ? (
+            <span
+              className="muted"
+              style={{ fontSize: "0.8rem", color: "var(--danger, #e87a9a)" }}
+            >
+              {openError}
+            </span>
+          ) : null}
+        </div>
+        {modalFallback ? (
+          <div
+            className="lab-chart-modal-backdrop"
+            role="presentation"
+            onClick={() => setModalFallback(false)}
+          >
+            <div
+              className="lab-chart-modal"
+              role="dialog"
+              aria-modal="true"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div
+                className="row"
+                style={{ justifyContent: "flex-end", marginBottom: 8 }}
+              >
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => setModalFallback(false)}
+                >
+                  Закрыть
+                </button>
+              </div>
+              <LabChartPanel
+                {...buildSyncPayload(
+                  events,
+                  allSensors,
+                  focus,
+                  valvesMap,
+                  heaterIds,
+                  liveActuators
+                )}
+                windowMode={false}
+              />
+            </div>
+          </div>
+        ) : null}
+      </div>
     );
   }
 
   function renderCard(name: string) {
     const { module, name: local } = parseSeriesKey(name);
     let pts = sensorSeries(events, name, 100);
-    // Мощность: если sensor-точек мало — берём из pump-событий START/STOP.
     if (local === "pumpPower" && pts.length < 2 && module) {
       const fromPump = pumpPowerSeries(events, null, 100, module);
       if (fromPump.length > pts.length) pts = fromPump;
     }
-    // Одна точка → дублируем, чтобы sparkline не писал «мало точек».
     if (pts.length === 1) {
       const p = pts[0]!;
       pts = [
@@ -144,11 +327,8 @@ export function ModulesLabCharts({
         key={name}
         type="button"
         className="lab-chart-card lab-chart-card-btn"
-        onClick={() => {
-          setFocus(name);
-          setExpanded(true);
-        }}
-        title="Открыть увеличенный график"
+        onClick={() => void openChart(name)}
+        title="Открыть график комплекса в отдельном окне"
       >
         <div className="lab-chart-title">
           {meta.label}
@@ -159,7 +339,7 @@ export function ModulesLabCharts({
         </div>
         {pts.length < 2 ? (
           <p className="muted" style={{ margin: 0, fontSize: "0.85rem" }}>
-            мало точек ({pts.length}) — клик для настроек
+            мало точек ({pts.length}) — клик для окна
           </p>
         ) : (
           <Sparkline points={pts} height={72} />
@@ -168,8 +348,34 @@ export function ModulesLabCharts({
     );
   }
 
+  const modalPayload = buildSyncPayload(
+    events,
+    allSensors,
+    focus,
+    valvesMap,
+    heaterIds,
+    liveActuators
+  );
+
   return (
     <>
+      <div className="row" style={{ marginBottom: 10, gap: 8, flexWrap: "wrap" }}>
+        <button
+          type="button"
+          className="btn"
+          onClick={() => void openChart(sensorNames[0] ?? null)}
+        >
+          Открыть график в окне
+        </button>
+        <span className="muted" style={{ fontSize: "0.8rem" }}>
+          отдельное окно · второй монитор / полный экран (F11)
+        </span>
+        {openError ? (
+          <span className="muted" style={{ fontSize: "0.8rem", color: "var(--danger, #e87a9a)" }}>
+            {openError}
+          </span>
+        ) : null}
+      </div>
       {groupedNames ? (
         <div className="lab-charts-grouped">
           {(["milk", "coffee", "water"] as const).map((mod) => {
@@ -208,9 +414,7 @@ export function ModulesLabCharts({
           {groupedNames.other!.length > 0 ? (
             <div className="lab-charts-group">
               <div className="lab-charts-group-title">прочее</div>
-              <div className="lab-charts">
-                {groupedNames.other!.map(renderCard)}
-              </div>
+              <div className="lab-charts">{groupedNames.other!.map(renderCard)}</div>
             </div>
           ) : null}
         </div>
@@ -218,652 +422,74 @@ export function ModulesLabCharts({
         <div className="lab-charts">{sensorNames.map(renderCard)}</div>
       )}
 
-      {expanded ? (
-        <ExpandedChart
-          events={events}
-          allSensors={allSensors}
-          initialSensor={focus ?? sensorNames[0] ?? allSensors[0] ?? null}
-          valvesMap={valvesMap}
-          heaterIds={heaterIds}
-          onClose={() => setExpanded(false)}
-        />
+      {modalFallback ? (
+        <div
+          className="lab-chart-modal-backdrop"
+          role="presentation"
+          onClick={() => setModalFallback(false)}
+        >
+          <div
+            className="lab-chart-modal"
+            role="dialog"
+            aria-modal="true"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="row" style={{ justifyContent: "flex-end", marginBottom: 8 }}>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setModalFallback(false)}
+              >
+                Закрыть
+              </button>
+            </div>
+            <LabChartPanel {...modalPayload} windowMode={false} />
+          </div>
+        </div>
       ) : null}
     </>
   );
 }
 
-function ExpandedChart({
-  events,
-  allSensors,
-  initialSensor,
-  valvesMap,
-  heaterIds,
-  onClose,
-}: {
-  events: LabEvent[];
-  allSensors: string[];
-  initialSensor: string | null;
-  valvesMap: Record<DrinkxHost, string[]>;
-  heaterIds: string[];
-  onClose: () => void;
-}) {
-  const [selected, setSelected] = useState<Set<string>>(() => {
-    const s = new Set<string>();
-    if (initialSensor) s.add(initialSensor);
-    return s;
-  });
-  const [timeScale, setTimeScale] = useState<ChartTimeScale>("5m");
-  const [yScale, setYScale] = useState<YScale>("auto");
-  const [showPumpOn, setShowPumpOn] = useState<Set<DrinkxHost>>(new Set());
-  const [showPumpPower, setShowPumpPower] = useState<Set<DrinkxHost>>(
-    new Set()
+/** Страница отдельного окна графика (live sync или standalone + импорт лога). */
+export function LabChartWindowPage() {
+  const [payload, setPayload] = useState<LabChartSyncPayload>(
+    EMPTY_LAB_CHART_PAYLOAD
   );
-  const [valvesOn, setValvesOn] = useState<Set<string>>(new Set());
-  const [heatersOn, setHeatersOn] = useState<Set<string>>(new Set());
-  const [markerT, setMarkerT] = useState<number | null>(null);
+  const [focus, setFocus] = useState<string | null>(() => {
+    try {
+      return new URLSearchParams(window.location.search).get("focus");
+    } catch {
+      return null;
+    }
+  });
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+    void window.desktop.pullLabChartState?.().then((raw) => {
+      if (raw && typeof raw === "object") {
+        setPayload(raw as LabChartSyncPayload);
+      }
+    });
+    const offState = window.desktop.onLabChartState?.((raw) => {
+      if (raw && typeof raw === "object") {
+        setPayload(raw as LabChartSyncPayload);
+      }
+    });
+    const offFocus = window.desktop.onLabChartFocus?.((p) => {
+      if (p.focusSensor) setFocus(p.focusSensor);
+    });
+    return () => {
+      offState?.();
+      offFocus?.();
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
-  const since = chartSinceMs(timeScale);
-  const limit = timeScale === "all" ? 500 : 300;
-
-  const continuous = useMemo(() => {
-    const series: Array<{
-      id: string;
-      label: string;
-      code: string;
-      unit: string;
-      color: string;
-      points: Array<{ t: number; v: number }>;
-    }> = [];
-    let ci = 0;
-    for (const name of allSensors) {
-      if (!selected.has(name)) continue;
-      const meta = chartSeriesMeta(name);
-      const { module, name: local } = parseSeriesKey(name);
-      let points = sensorSeries(events, name, limit, since);
-      if (local === "pumpPower" && points.length < 2 && module) {
-        const fromPump = pumpPowerSeries(events, since, limit, module);
-        if (fromPump.length > points.length) points = fromPump;
-      }
-      series.push({
-        id: name,
-        label: meta.label,
-        code: meta.code,
-        unit: meta.unit,
-        color: SERIES_COLORS[ci % SERIES_COLORS.length]!,
-        points,
-      });
-      ci += 1;
-    }
-    for (const mod of DRINKX_HOSTS) {
-      if (!showPumpPower.has(mod)) continue;
-      const id = seriesKey(mod, "pumpPower");
-      if (series.some((s) => s.id === id)) continue;
-      const meta = chartSeriesMeta(id);
-      const fromSensor = sensorSeries(events, id, limit, since);
-      const fromPump =
-        fromSensor.length >= 2
-          ? fromSensor
-          : pumpPowerSeries(events, since, limit, mod);
-      series.push({
-        id,
-        label: meta.label,
-        code: meta.code,
-        unit: meta.unit,
-        color: SERIES_COLORS[ci % SERIES_COLORS.length]!,
-        points: fromPump,
-      });
-      ci += 1;
-    }
-    return series;
-  }, [allSensors, selected, events, limit, since, showPumpPower]);
-
-  const actuators = useMemo(() => {
-    const list: Array<{
-      id: string;
-      label: string;
-      color: string;
-      points: Array<{ t: number; v: number }>;
-    }> = [];
-    let ai = 0;
-    for (const mod of DRINKX_HOSTS) {
-      for (const id of valvesMap[mod] ?? []) {
-        const key = seriesKey(mod, id);
-        if (!valvesOn.has(key)) continue;
-        list.push({
-          id: `valve:${key}`,
-          label: `${mod} · ${VALVE_LABELS[id] ?? id}`,
-          color: ACTUATOR_COLORS[ai % ACTUATOR_COLORS.length]!,
-          points: booleanStepSeries(events, "valve", key, since, limit),
-        });
-        ai += 1;
-      }
-      if (showPumpOn.has(mod)) {
-        const key = seriesKey(mod, "pump");
-        list.push({
-          id: `pump:${key}`,
-          label: `${mod} · Насос ON/OFF`,
-          color: ACTUATOR_COLORS[ai % ACTUATOR_COLORS.length]!,
-          points: booleanStepSeries(events, "pump", key, since, limit),
-        });
-        ai += 1;
-      }
-      for (const hid of heaterIds) {
-        const key = seriesKey(mod, hid);
-        if (!heatersOn.has(key)) continue;
-        list.push({
-          id: `heater:${key}`,
-          label: `${mod} · ${HEATER_LABELS[hid] ?? hid}`,
-          color: ACTUATOR_COLORS[ai % ACTUATOR_COLORS.length]!,
-          points: booleanStepSeries(events, "heater", key, since, limit),
-        });
-        ai += 1;
-      }
-    }
-    return list;
-  }, [
-    valvesMap,
-    valvesOn,
-    heaterIds,
-    heatersOn,
-    showPumpOn,
-    events,
-    since,
-    limit,
-  ]);
-
-  const slice = useMemo((): LabSnapshotRow[] => {
-    if (markerT == null) return [];
-    return snapshotAt(events, markerT);
-  }, [events, markerT]);
-
-  function toggleSensor(name: string) {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
-      return next;
-    });
-  }
-
-  function toggleSet(
-    setter: Dispatch<SetStateAction<Set<string>>>,
-    id: string
-  ) {
-    setter((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
-
-  function toggleHostSet(
-    setter: Dispatch<SetStateAction<Set<DrinkxHost>>>,
-    mod: DrinkxHost
-  ) {
-    setter((prev) => {
-      const next = new Set(prev);
-      if (next.has(mod)) next.delete(mod);
-      else next.add(mod);
-      return next;
-    });
-  }
-
-  const sensorsByModule = useMemo(() => {
-    const map: Record<string, string[]> = {
-      milk: [],
-      coffee: [],
-      water: [],
-      other: [],
-    };
-    for (const key of allSensors) {
-      const { module } = parseSeriesKey(key);
-      if (module === "milk" || module === "coffee" || module === "water") {
-        map[module]!.push(key);
-      } else {
-        map.other!.push(key);
-      }
-    }
-    return map;
-  }, [allSensors]);
+  }, []);
 
   return (
-    <div
-      className="lab-chart-modal-backdrop"
-      role="presentation"
-      onClick={onClose}
-    >
-      <div
-        className="lab-chart-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Увеличенный график комплекса"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="lab-chart-modal-head">
-          <h2 style={{ margin: 0, fontSize: "1.1rem" }}>
-            График комплекса
-          </h2>
-          <button type="button" className="btn" onClick={onClose}>
-            Закрыть
-          </button>
-        </div>
-
-        <div className="lab-chart-modal-toolbar">
-          <label className="muted">
-            время{" "}
-            <select
-              value={timeScale}
-              onChange={(e) =>
-                setTimeScale(e.target.value as ChartTimeScale)
-              }
-            >
-              <option value="1m">1 мин</option>
-              <option value="5m">5 мин</option>
-              <option value="15m">15 мин</option>
-              <option value="all">всё</option>
-            </select>
-          </label>
-          <label className="muted">
-            шкала Y{" "}
-            <select
-              value={yScale}
-              onChange={(e) => setYScale(e.target.value as YScale)}
-            >
-              <option value="auto">auto</option>
-              <option value="0-5">0–5 (bar / A)</option>
-              <option value="0-100">0–100 (%)</option>
-              <option value="0-120">0–120 (°C)</option>
-            </select>
-          </label>
-          {markerT != null ? (
-            <button
-              type="button"
-              className="btn"
-              onClick={() => setMarkerT(null)}
-            >
-              Сбросить маркер
-            </button>
-          ) : (
-            <span className="muted">Клик по графику — маркер среза</span>
-          )}
-        </div>
-
-        <div className="lab-chart-modal-body">
-          <aside className="lab-chart-sidebar">
-            {DRINKX_HOSTS.map((mod) => (
-              <div key={mod} className="lab-chart-side-block">
-                <div className="lab-chart-side-title">Датчики · {mod}</div>
-                {(sensorsByModule[mod] ?? []).map((name) => {
-                  const meta = chartSeriesMeta(name);
-                  return (
-                    <label key={name} className="lab-chart-check">
-                      <input
-                        type="checkbox"
-                        checked={selected.has(name)}
-                        onChange={() => toggleSensor(name)}
-                      />
-                      <span>
-                        {meta.label.replace(`${mod} · `, "")}
-                        <span className="lab-chart-meta">
-                          {meta.code}
-                          {meta.unit ? ` · ${meta.unit}` : ""}
-                        </span>
-                      </span>
-                    </label>
-                  );
-                })}
-                <div className="lab-chart-side-title" style={{ marginTop: 8 }}>
-                  Исполнители · {mod}
-                </div>
-                {(valvesMap[mod] ?? []).map((id) => {
-                  const key = seriesKey(mod, id);
-                  return (
-                    <label key={key} className="lab-chart-check">
-                      <input
-                        type="checkbox"
-                        checked={valvesOn.has(key)}
-                        onChange={() => toggleSet(setValvesOn, key)}
-                      />
-                      <span>
-                        {VALVE_LABELS[id] ?? id}
-                        <span className="lab-chart-meta">{key}</span>
-                      </span>
-                    </label>
-                  );
-                })}
-                <label className="lab-chart-check">
-                  <input
-                    type="checkbox"
-                    checked={showPumpOn.has(mod)}
-                    onChange={() => toggleHostSet(setShowPumpOn, mod)}
-                  />
-                  <span>
-                    Насос ON/OFF
-                    <span className="lab-chart-meta">{mod}.pump</span>
-                  </span>
-                </label>
-                <label className="lab-chart-check">
-                  <input
-                    type="checkbox"
-                    checked={showPumpPower.has(mod)}
-                    onChange={() => toggleHostSet(setShowPumpPower, mod)}
-                  />
-                  <span>
-                    Мощность насоса %
-                    <span className="lab-chart-meta">{mod}.pump.power</span>
-                  </span>
-                </label>
-                {heaterIds.map((hid) => {
-                  const key = seriesKey(mod, hid);
-                  return (
-                    <label key={key} className="lab-chart-check">
-                      <input
-                        type="checkbox"
-                        checked={heatersOn.has(key)}
-                        onChange={() => toggleSet(setHeatersOn, key)}
-                      />
-                      <span>
-                        {HEATER_LABELS[hid] ?? hid}
-                        <span className="lab-chart-meta">{key}</span>
-                      </span>
-                    </label>
-                  );
-                })}
-              </div>
-            ))}
-          </aside>
-
-          <div className="lab-chart-main">
-            <MultiChart
-              continuous={continuous}
-              actuators={actuators}
-              yScale={yScale}
-              timeScale={timeScale}
-              since={since}
-              markerT={markerT}
-              onMark={setMarkerT}
-            />
-            <div className="lab-chart-legend">
-              {continuous.map((s) => (
-                <span key={s.id} className="lab-chart-legend-item">
-                  <i style={{ background: s.color }} />
-                  {s.label}
-                  {s.unit ? ` (${s.unit})` : ""}
-                  <code>{s.code}</code>
-                </span>
-              ))}
-              {actuators.map((s) => (
-                <span key={s.id} className="lab-chart-legend-item">
-                  <i style={{ background: s.color }} />
-                  {s.label}
-                  <code>0/1</code>
-                </span>
-              ))}
-            </div>
-
-            {markerT != null ? (
-              <div className="lab-chart-slice">
-                <h3>
-                  Срез · {new Date(markerT).toLocaleTimeString()}
-                </h3>
-                {slice.length === 0 ? (
-                  <p className="muted">Нет событий до маркера</p>
-                ) : (
-                  <table className="lab-slice-table">
-                    <thead>
-                      <tr>
-                        <th>Модуль</th>
-                        <th>Имя</th>
-                        <th>Код</th>
-                        <th>Значение</th>
-                        <th>Ед.</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {slice.map((row) => (
-                        <tr key={`${row.kind}:${row.key}`}>
-                          <td>{row.module}</td>
-                          <td>{row.label}</td>
-                          <td>
-                            <code>{row.code}</code>
-                          </td>
-                          <td>
-                            {row.value === true
-                              ? "ON"
-                              : row.value === false
-                                ? "OFF"
-                                : row.value == null
-                                  ? "—"
-                                  : String(row.value)}
-                          </td>
-                          <td>{row.unit}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </div>
-            ) : null}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function MultiChart({
-  continuous,
-  actuators,
-  yScale,
-  timeScale,
-  since,
-  markerT,
-  onMark,
-}: {
-  continuous: Array<{
-    id: string;
-    color: string;
-    points: Array<{ t: number; v: number }>;
-  }>;
-  actuators: Array<{
-    id: string;
-    color: string;
-    points: Array<{ t: number; v: number }>;
-  }>;
-  yScale: YScale;
-  timeScale: ChartTimeScale;
-  since: number | null;
-  markerT: number | null;
-  onMark: (t: number) => void;
-}) {
-  const w = 900;
-  const h = 420;
-  const padL = 48;
-  const padR = 16;
-  const padT = 16;
-  const laneH = 14;
-  const laneGap = 4;
-  const actuatorBand =
-    actuators.length > 0
-      ? actuators.length * (laneH + laneGap) + 12
-      : 0;
-  const padB = 28 + actuatorBand;
-  const plotH = h - padT - padB;
-  const plotW = w - padL - padR;
-
-  const allPts = continuous.flatMap((s) => s.points);
-  const allT = [
-    ...allPts.map((p) => p.t),
-    ...actuators.flatMap((a) => a.points.map((p) => p.t)),
-  ];
-  const now = Date.now();
-  let tMin =
-    allT.length > 0 ? Math.min(...allT) : since ?? now - 60_000;
-  let tMax = allT.length > 0 ? Math.max(...allT) : now;
-  if (since != null) tMin = Math.min(tMin, since);
-  if (timeScale !== "all") tMax = Math.max(tMax, now);
-  if (tMax <= tMin) tMax = tMin + 1;
-
-  let yMin = 0;
-  let yMax = 1;
-  if (yScale === "0-5") {
-    yMin = 0;
-    yMax = 5;
-  } else if (yScale === "0-100") {
-    yMin = 0;
-    yMax = 100;
-  } else if (yScale === "0-120") {
-    yMin = 0;
-    yMax = 120;
-  } else if (allPts.length > 0) {
-    yMin = Math.min(...allPts.map((p) => p.v));
-    yMax = Math.max(...allPts.map((p) => p.v));
-    if (yMax === yMin) {
-      yMin -= 1;
-      yMax += 1;
-    }
-    const pad = (yMax - yMin) * 0.08;
-    yMin -= pad;
-    yMax += pad;
-  }
-
-  const xOf = (t: number) =>
-    padL + ((t - tMin) / (tMax - tMin)) * plotW;
-  const yOf = (v: number) =>
-    padT + plotH - ((v - yMin) / (yMax - yMin || 1)) * plotH;
-  const tOf = (x: number) =>
-    tMin + ((x - padL) / plotW) * (tMax - tMin);
-
-  function pathFor(
-    points: Array<{ t: number; v: number }>,
-    yMap: (v: number) => number
-  ): string {
-    if (points.length === 0) return "";
-    return points
-      .map((p, i) => {
-        const x = xOf(p.t);
-        const y = yMap(p.v);
-        return `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
-      })
-      .join(" ");
-  }
-
-  const hasData =
-    continuous.some((s) => s.points.length > 0) ||
-    actuators.some((a) => a.points.length > 0);
-
-  return (
-    <svg
-      viewBox={`0 0 ${w} ${h}`}
-      width="100%"
-      height={h}
-      className="lab-spark lab-spark-lg lab-spark-interactive"
-      onClick={(e) => {
-        const svg = e.currentTarget;
-        const rect = svg.getBoundingClientRect();
-        const x = ((e.clientX - rect.left) / rect.width) * w;
-        if (x < padL || x > padL + plotW) return;
-        onMark(tOf(x));
-      }}
-    >
-      <rect
-        x={padL}
-        y={padT}
-        width={plotW}
-        height={plotH}
-        fill="rgba(0,0,0,0.2)"
-        rx={4}
-      />
-      <text x={4} y={padT + 10} fill="var(--text-muted)" fontSize="11">
-        {yMax.toFixed(2)}
-      </text>
-      <text x={4} y={padT + plotH} fill="var(--text-muted)" fontSize="11">
-        {yMin.toFixed(2)}
-      </text>
-      {!hasData ? (
-        <text
-          x={w / 2}
-          y={h / 2}
-          textAnchor="middle"
-          fill="var(--text-muted)"
-          fontSize="14"
-        >
-          Нет точек в выбранном окне
-        </text>
-      ) : null}
-      {continuous.map((s) => (
-        <path
-          key={s.id}
-          d={pathFor(s.points, yOf)}
-          fill="none"
-          stroke={s.color}
-          strokeWidth="2.2"
-        />
-      ))}
-      {actuators.map((a, idx) => {
-        const top = h - padB + 8 + idx * (laneH + laneGap);
-        const yMap = (v: number) => top + laneH - v * laneH;
-        return (
-          <g key={a.id}>
-            <text
-              x={4}
-              y={top + laneH - 2}
-              fill="var(--text-muted)"
-              fontSize="9"
-            >
-              0/1
-            </text>
-            <rect
-              x={padL}
-              y={top}
-              width={plotW}
-              height={laneH}
-              fill="rgba(255,255,255,0.04)"
-              rx={2}
-            />
-            <path
-              d={pathFor(a.points, yMap)}
-              fill="none"
-              stroke={a.color}
-              strokeWidth="2"
-            />
-          </g>
-        );
-      })}
-      {markerT != null && markerT >= tMin && markerT <= tMax ? (
-        <line
-          className="lab-chart-marker"
-          x1={xOf(markerT)}
-          x2={xOf(markerT)}
-          y1={padT}
-          y2={h - 20}
-          stroke="var(--accent)"
-          strokeWidth="1.5"
-          strokeDasharray="4 3"
-        />
-      ) : null}
-      <text x={padL} y={h - 6} fill="var(--text-muted)" fontSize="10">
-        {new Date(tMin).toLocaleTimeString()}
-      </text>
-      <text
-        x={w - padR}
-        y={h - 6}
-        textAnchor="end"
-        fill="var(--text-muted)"
-        fontSize="10"
-      >
-        {new Date(tMax).toLocaleTimeString()}
-      </text>
-    </svg>
+    <LabChartPanel
+      {...payload}
+      initialSensor={focus ?? payload.initialSensor}
+      windowMode
+    />
   );
 }
 

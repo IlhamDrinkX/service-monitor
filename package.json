@@ -13,6 +13,7 @@
     "dist": "npm run build -w @service-monitor/core && npm run dist -w @service-monitor/desktop",
     "dist:win": "npm run build -w @service-monitor/core && npm run dist:win -w @service-monitor/desktop",
     "dist:mac": "npm run build -w @service-monitor/core && npm run dist:mac -w @service-monitor/desktop",
+    "dist:linux": "npm run build -w @service-monitor/core && npm run dist:linux -w @service-monitor/desktop",
     "build:local": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-local.ps1",
     "bootstrap:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap.ps1",
     "bootstrap:mac": "bash scripts/bootstrap.sh",

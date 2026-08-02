@@ -17,6 +17,8 @@ export function useLabTelemetry(opts: {
   getSessionMode: () => "remote" | "local" | null | undefined;
   valveHoldUntil?: Map<string, number>;
   isModuleTracked?: (host: DrinkxHost) => boolean;
+  /** XOR laptop/onboard: reduce laptop poll cadence (see shouldThrottleLabPoll in core). */
+  throttled?: boolean;
 }): {
   snap: LabSnapshot;
   controllerRef: MutableRefObject<LabTelemetryController | null>;
@@ -51,6 +53,7 @@ export function useLabTelemetry(opts: {
       valveHoldUntil: depsRef.current.valveHoldUntil,
       isModuleTracked: (h) => depsRef.current.isModuleTracked?.(h) !== false,
     });
+    ctrl.setThrottled(opts.throttled === true);
     controllerRef.current = ctrl;
     const unsub = ctrl.subscribe(setSnap);
     ctrl.start();
@@ -59,7 +62,14 @@ export function useLabTelemetry(opts: {
       ctrl.stop();
       if (controllerRef.current === ctrl) controllerRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opts.live]);
+
+  // XOR laptop/onboard: apply cadence changes to the running controller
+  // without tearing it down (recreating would reset generations/pause state).
+  useEffect(() => {
+    controllerRef.current?.setThrottled(opts.throttled === true);
+  }, [opts.throttled]);
 
   return { snap, controllerRef };
 }

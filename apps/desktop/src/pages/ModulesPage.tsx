@@ -7,7 +7,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   defaultHwid,
   HEATER_TARGET_C,
+  shouldThrottleLabPoll,
   type DrinkxHost,
+  type LabPollMode,
   type NatsMusterEntry,
 } from "@service-monitor/core";
 import { LabTerminalPanel } from "../components/modules/LabTerminalPanel";
@@ -44,6 +46,11 @@ import {
 import { useModulesLabNats } from "../lab/modulesLab/useModulesLabNats";
 import { useModulesLabTelemetryBridge } from "../lab/modulesLab/useModulesLabTelemetryBridge";
 import { useLabTelemetry } from "../lab/useLabTelemetry";
+import { useOnboardRealtimeGate } from "../lab/useOnboardRealtimeGate";
+import {
+  LAB_ONBOARD_XOR_EVENT,
+  readLabOnboardXorMode,
+} from "../lib/lab-onboard-xor";
 import { useComplexSession } from "../state/useComplexSession";
 
 export function ModulesPage() {
@@ -59,6 +66,7 @@ export function ModulesPage() {
   const [heaterTarget, setHeaterTarget] = useState<number>(HEATER_TARGET_C);
   const [showCharts, setShowCharts] = useState(false);
   const [showSensorCharts, setShowSensorCharts] = useState(false);
+  const [xorMode, setXorMode] = useState<LabPollMode>(readLabOnboardXorMode);
 
   const scenarioBusyToken = useRef<object | null>(null);
   const heaterTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(
@@ -135,6 +143,24 @@ export function ModulesPage() {
     typeof sessionStorage !== "undefined" &&
     sessionStorage.getItem("sm.writeUnlocked") === "1";
 
+  // XOR laptop/onboard (Настройки → «Опрос модулей»): when the onboard
+  // lab-logger is installed and reachable, throttle the laptop's own dense
+  // Lab poll instead of doubling load on the same complex NATS/DX endpoints.
+  useEffect(() => {
+    const onPref = (e: Event) => {
+      const detail = (e as CustomEvent<{ mode: LabPollMode }>).detail;
+      setXorMode(detail?.mode ?? readLabOnboardXorMode());
+    };
+    window.addEventListener(LAB_ONBOARD_XOR_EVENT, onPref);
+    return () => window.removeEventListener(LAB_ONBOARD_XOR_EVENT, onPref);
+  }, []);
+  const onboardReady = useOnboardRealtimeGate({
+    live,
+    seriesLabel: session.seriesLabel,
+    enabled: xorMode !== "dense",
+  });
+  const pollThrottled = shouldThrottleLabPoll(xorMode, onboardReady);
+
   const { snap: labSnap, controllerRef: labTelemetryRef } = useLabTelemetry({
     live,
     getActiveHost: () => hostRef.current,
@@ -142,6 +168,7 @@ export function ModulesPage() {
     getSessionMode: () => session.mode,
     valveHoldUntil: valveHoldUntil.current,
     isModuleTracked,
+    throttled: pollThrottled,
   });
 
   const {
@@ -323,6 +350,7 @@ export function ModulesPage() {
           busy={busy}
           canTryNats={canTryNats}
           controlsDisabled={controlsDisabled}
+          pollThrottled={pollThrottled}
           labEventsCount={labEvents.length}
           labEvents={labEvents}
           showCharts={showCharts}

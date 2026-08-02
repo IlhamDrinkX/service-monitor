@@ -18,6 +18,9 @@ import {
   applyDxPumpCurrents,
   extractOpenValveNumbers,
   mergeOpenValveNumbers,
+  shouldThrottleLabPoll,
+  isLabPollMode,
+  LAB_POLL_MODE_DEFAULT,
 } from "./index.js";
 
 describe("lab-telemetry", () => {
@@ -336,5 +339,37 @@ describe("applyDxPumpCurrents hostHealth.dxOk", () => {
     assert.equal(next.hostHealth.coffee?.dxOk, false);
     assert.equal(next.hostHealth.water?.dxOk, false);
     assert.match(next.dxUiStatus, /DX UI пусто/);
+  });
+});
+
+describe("shouldThrottleLabPoll (XOR laptop/onboard dense poll)", () => {
+  it("dense mode never throttles, regardless of onboard state", () => {
+    assert.equal(shouldThrottleLabPoll("dense", true), false);
+    assert.equal(shouldThrottleLabPoll("dense", false), false);
+  });
+
+  it("reduced mode always throttles, regardless of onboard state", () => {
+    assert.equal(shouldThrottleLabPoll("reduced", true), true);
+    assert.equal(shouldThrottleLabPoll("reduced", false), true);
+  });
+
+  it("auto mode is the real XOR: throttles only when onboard is ready", () => {
+    assert.equal(shouldThrottleLabPoll("auto", true), true);
+    assert.equal(shouldThrottleLabPoll("auto", false), false);
+  });
+
+  it("LAB_POLL_MODE_DEFAULT is auto", () => {
+    assert.equal(LAB_POLL_MODE_DEFAULT, "auto");
+  });
+
+  it("isLabPollMode narrows valid string values only", () => {
+    assert.equal(isLabPollMode("dense"), true);
+    assert.equal(isLabPollMode("auto"), true);
+    assert.equal(isLabPollMode("reduced"), true);
+    assert.equal(isLabPollMode("Auto"), false);
+    assert.equal(isLabPollMode(""), false);
+    assert.equal(isLabPollMode(null), false);
+    assert.equal(isLabPollMode(undefined), false);
+    assert.equal(isLabPollMode(1), false);
   });
 });

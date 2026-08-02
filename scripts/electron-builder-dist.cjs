@@ -11,11 +11,13 @@ const script =
     ? "electron-builder-win.cjs"
     : process.platform === "darwin"
       ? "electron-builder-mac.cjs"
-      : null;
+      : process.platform === "linux"
+        ? "electron-builder-linux.cjs"
+        : null;
 
 if (!script) {
   console.error(
-    `[dist] No installer target for platform=${process.platform}. Use dist:dir or build on Windows/macOS.`
+    `[dist] No installer target for platform=${process.platform}. Use dist:dir or build on Windows/macOS/Linux.`
   );
   process.exit(1);
 }

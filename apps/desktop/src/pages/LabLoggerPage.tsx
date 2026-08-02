@@ -686,6 +686,14 @@ export function LabLoggerPage() {
 
     if (controlsDisabled) return;
 
+    if (status?.installed !== true) {
+
+      pushLog("err", "Логгер не установлен на этом комплексе");
+
+      return;
+
+    }
+
     setBusy("view");
 
     try {
@@ -740,13 +748,21 @@ export function LabLoggerPage() {
 
     }
 
-  }, [controlsDisabled, pushLog]);
+  }, [controlsDisabled, pushLog, status]);
 
 
 
   const runDownload = useCallback(async () => {
 
     if (controlsDisabled) return;
+
+    if (status?.installed !== true) {
+
+      pushLog("err", "Логгер не установлен на этом комплексе");
+
+      return;
+
+    }
 
     setBusy("download");
 
@@ -774,7 +790,7 @@ export function LabLoggerPage() {
 
     }
 
-  }, [controlsDisabled, pushLog]);
+  }, [controlsDisabled, pushLog, status]);
 
 
 
@@ -1220,7 +1236,7 @@ export function LabLoggerPage() {
 
             variant="primary"
 
-            disabled={controlsDisabled || busy != null}
+            disabled={controlsDisabled || busy != null || status?.installed !== true}
 
             onClick={() => void runDownload()}
 
@@ -1234,7 +1250,7 @@ export function LabLoggerPage() {
 
           <ActionButton
 
-            disabled={controlsDisabled || busy != null}
+            disabled={controlsDisabled || busy != null || status?.installed !== true}
 
             onClick={() => void runLoadPreview()}
 
@@ -1247,6 +1263,18 @@ export function LabLoggerPage() {
           </ActionButton>
 
         </div>
+
+        {live && seriesOk && status?.installed !== true ? (
+
+          <p className="muted">
+
+            Логгер не установлен на этом комплексе — сначала «Установить»
+
+            выше (или нажмите «Статус», если уже устанавливали).
+
+          </p>
+
+        ) : null}
 
         {health ? (
 

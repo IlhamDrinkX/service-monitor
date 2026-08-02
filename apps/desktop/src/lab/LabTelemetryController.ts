@@ -16,7 +16,9 @@ import {
   MODULE_VALVES,
   NATS_SUBJECTS,
   LAB_ACTIVE_POLL_MS,
+  LAB_ACTIVE_POLL_REDUCED_MS,
   LAB_OTHER_STATUS_MS,
+  DX_POLL_REDUCED_MS,
   applyDxPumpCurrents,
   applyLabStatusReplies,
   computeNatsHostHealth,
@@ -94,6 +96,8 @@ export class LabTelemetryController {
   private tickN = 0;
   private milkSystemHoldUntil = 0;
   private lastOtherStatusAt = 0;
+  /** XOR laptop/onboard: when true, poll at the reduced cadence (see setThrottled). */
+  private throttled = false;
   private readonly deps: LabTelemetryDeps;
 
   // Plain field assignment, not a TS "parameter property" — Node's
@@ -123,8 +127,7 @@ export class LabTelemetryController {
     this.stopped = false;
     void this.natsTick();
     void this.dxTick();
-    this.natsTimer = setInterval(() => void this.natsTick(), LAB_ACTIVE_POLL_MS);
-    this.dxTimer = setInterval(() => void this.dxTick(), DX_INTERVAL_MS);
+    this.armTimers();
   }
 
   stop(): void {
@@ -136,6 +139,38 @@ export class LabTelemetryController {
     this.natsTimer = null;
     this.dxTimer = null;
     this.emit({ ...this.snap, pollInFlight: false, pollPaused: false });
+  }
+
+  /** Current effective cadence (ms) — for UI display / tests. */
+  getPollIntervalsMs(): { activeMs: number; dxMs: number } {
+    return this.throttled
+      ? { activeMs: LAB_ACTIVE_POLL_REDUCED_MS, dxMs: DX_POLL_REDUCED_MS }
+      : { activeMs: LAB_ACTIVE_POLL_MS, dxMs: DX_INTERVAL_MS };
+  }
+
+  isThrottled(): boolean {
+    return this.throttled;
+  }
+
+  /**
+   * XOR laptop/onboard: back off to the reduced cadence (or return to full
+   * rate). Safe to call at any time, including while stopped — the new
+   * cadence takes effect on the next `start()`; if already running, timers
+   * are re-armed immediately with the new interval (no forced extra tick).
+   */
+  setThrottled(next: boolean): void {
+    if (this.throttled === next) return;
+    this.throttled = next;
+    if (this.stopped) return;
+    if (this.natsTimer) clearInterval(this.natsTimer);
+    if (this.dxTimer) clearInterval(this.dxTimer);
+    this.armTimers();
+  }
+
+  private armTimers(): void {
+    const { activeMs, dxMs } = this.getPollIntervalsMs();
+    this.natsTimer = setInterval(() => void this.natsTick(), activeMs);
+    this.dxTimer = setInterval(() => void this.dxTick(), dxMs);
   }
 
   /** Пауза только NATS (команды). DX ток продолжает — иначе R/L_IS залипают на START. */

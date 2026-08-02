@@ -12,3 +12,7 @@ apps/desktop/release-build-*/
 debug-logs/
 .agent-notes/
 AGENT_NOTES.md
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/

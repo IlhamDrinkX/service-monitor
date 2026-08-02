@@ -259,6 +259,11 @@ export {
   STALE_MS,
   LAB_ACTIVE_POLL_MS,
   LAB_OTHER_STATUS_MS,
+  LAB_POLL_MODE_DEFAULT,
+  LAB_ACTIVE_POLL_REDUCED_MS,
+  DX_POLL_REDUCED_MS,
+  isLabPollMode,
+  shouldThrottleLabPoll,
   planLabNatsPoll,
   isTelemetryStale,
   applyLabStatusReplies,
@@ -274,6 +279,7 @@ export type {
   LabHostPwm,
   HostOkMap,
   DxPumpCurrentsPayload,
+  LabPollMode,
 } from "./nats/lab-telemetry.js";
 export {
   LAB_LOGGER_VERSION,

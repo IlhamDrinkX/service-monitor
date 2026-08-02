@@ -73,6 +73,7 @@ bash scripts/bootstrap.sh
 | `bootstrap.sh` | Инженер на macOS: update + dist:mac (Linux — без installer) |
 | `electron-builder-win.cjs` | NSIS: CSC off, clean release, retry spawn UNKNOWN |
 | `electron-builder-mac.cjs` | DMG: CSC off, clean release |
+| `electron-builder-linux.cjs` | AppImage + deb (x64), clean release, unsigned |
 
 Переменные:
 
@@ -126,7 +127,9 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-Workflow [`.github/workflows/release.yml`](../.github/workflows/release.yml) соберёт Windows + macOS артефакты и приложит их к GitHub Release.
+Workflow [`.github/workflows/release.yml`](../.github/workflows/release.yml) соберёт Windows + macOS + Linux артефакты и приложит их к GitHub Release.
+
+Линукс-сборка сейчас — только `x64` (AppImage + `.deb`). Если целевая машина (комплекс) на ARM (например, Raspberry Pi) — `x64`-сборка не запустится; нужно будет отдельно добавить `arm64`-таргет и либо нативный ARM-раннер GitHub (`ubuntu-24.04-arm`), либо QEMU-эмуляцию в electron-builder — сообщите архитектуру комплекса, если это актуально.
 
 Локально без CI:
 
@@ -134,6 +137,7 @@ Workflow [`.github/workflows/release.yml`](../.github/workflows/release.yml) с�
 npm install --legacy-peer-deps
 npm run dist:win -w @service-monitor/desktop   # Windows
 npm run dist:mac -w @service-monitor/desktop   # macOS
+npm run dist:linux -w @service-monitor/desktop # Linux (AppImage + deb, x64)
 ```
 
 ## После сна ноутбука

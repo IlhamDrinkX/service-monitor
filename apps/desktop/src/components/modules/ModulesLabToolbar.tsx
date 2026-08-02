@@ -29,6 +29,8 @@ export function ModulesLabToolbar(props: {
   busy: string | null;
   canTryNats: boolean;
   controlsDisabled: boolean;
+  /** XOR laptop/onboard: laptop Lab poll running at the reduced cadence. */
+  pollThrottled?: boolean;
   labEventsCount: number;
   labEvents?: LabEvent[];
   showCharts: boolean;
@@ -57,6 +59,7 @@ export function ModulesLabToolbar(props: {
     busy,
     canTryNats,
     controlsDisabled,
+    pollThrottled,
     labEventsCount,
     labEvents,
     showCharts,
@@ -91,6 +94,15 @@ export function ModulesLabToolbar(props: {
         <span className={`badge${live ? " on" : ""}`}>
           {live ? "NATS client ON" : "NATS client OFF"}
         </span>
+        {live && pollThrottled ? (
+          <span
+            className="badge"
+            title="Опрос с ноутбука снижен — работает бортовой realtime (см. Настройки)"
+          >
+            опрос: снижен (бортовой)
+            <HelpTip controlId="modules.pollThrottled" />
+          </span>
+        ) : null}
         <span className="badge">{labEventsCount}</span>
         <ActionButton
           helpId="modules.nats"

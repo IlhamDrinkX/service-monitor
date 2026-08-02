@@ -833,7 +833,7 @@ export function LabChartPanel({
           <input
             ref={importRef}
             type="file"
-            accept="application/json,.json"
+            accept="application/json,.json,.jsonl"
             hidden
             onChange={(event) => {
               const file = event.target.files?.[0];

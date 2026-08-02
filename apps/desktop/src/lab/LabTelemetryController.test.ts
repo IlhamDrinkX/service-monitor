@@ -346,3 +346,58 @@ describe("LabTelemetryController / start()/stop() lifecycle", () => {
     ctl.stop();
   });
 });
+
+describe("LabTelemetryController / setThrottled (XOR laptop/onboard)", () => {
+  it("defaults to dense cadence; isThrottled()/getPollIntervalsMs() reflect setThrottled(true/false)", () => {
+    installDesktopMock();
+    const ctl = track(new LabTelemetryController(makeDeps()));
+    assert.equal(ctl.isThrottled(), false);
+    const dense = ctl.getPollIntervalsMs();
+    assert.ok(dense.activeMs < 1_000, `expected dense activeMs, got ${dense.activeMs}`);
+
+    ctl.setThrottled(true);
+    assert.equal(ctl.isThrottled(), true);
+    const reduced = ctl.getPollIntervalsMs();
+    assert.ok(
+      reduced.activeMs > dense.activeMs,
+      `expected reduced activeMs > dense (${dense.activeMs}), got ${reduced.activeMs}`
+    );
+
+    ctl.setThrottled(false);
+    assert.equal(ctl.isThrottled(), false);
+    assert.deepEqual(ctl.getPollIntervalsMs(), dense);
+  });
+
+  it("setThrottled() is safe to call before start() and while stopped", () => {
+    installDesktopMock();
+    const ctl = track(new LabTelemetryController(makeDeps()));
+    ctl.setThrottled(true); // before start() — must not throw
+    assert.equal(ctl.isThrottled(), true);
+    ctl.stop(); // still stopped — must not throw
+    ctl.setThrottled(false);
+    assert.equal(ctl.isThrottled(), false);
+  });
+
+  it("setThrottled() with the same value is a no-op (does not re-arm timers unnecessarily)", async () => {
+    installDesktopMock();
+    const ctl = track(new LabTelemetryController(makeDeps()));
+    ctl.start();
+    await waitFor(ctl, (s) => s.tick > 0 && !s.pollInFlight);
+    ctl.setThrottled(false); // already false — should be a no-op, not throw
+    assert.equal(ctl.isThrottled(), false);
+  });
+
+  it("re-arms while running: a throttled controller still ticks (at the reduced cadence)", async () => {
+    installDesktopMock();
+    const ctl = track(new LabTelemetryController(makeDeps()));
+    ctl.setThrottled(true);
+    ctl.start();
+    await waitFor(ctl, (s) => s.tick > 0 && !s.pollInFlight);
+    assert.equal(ctl.isThrottled(), true);
+    const tickAfterFirst = ctl.getSnapshot().tick;
+    // Force a second tick via kick() (independent of the reduced-interval timer)
+    // to confirm the controller is still alive and responsive while throttled.
+    ctl.kick();
+    await waitFor(ctl, (s) => s.tick > tickAfterFirst && !s.pollInFlight);
+  });
+});

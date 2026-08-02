@@ -21,6 +21,8 @@ jobs:
             dist: dist:win
           - os: macos-latest
             dist: dist:mac
+          - os: ubuntu-latest
+            dist: dist:linux
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -48,6 +50,8 @@ jobs:
             apps/desktop/release/*.dmg
             apps/desktop/release/*.zip
             apps/desktop/release/*.blockmap
+            apps/desktop/release/*.AppImage
+            apps/desktop/release/*.deb
           if-no-files-found: warn
 
   release:

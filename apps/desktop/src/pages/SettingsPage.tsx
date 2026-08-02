@@ -3,6 +3,7 @@
  */
 
 import { useEffect, useState } from "react";
+import type { LabPollMode } from "@service-monitor/core";
 import { ActionButton } from "../components/ActionButton";
 import { HelpTip } from "../components/HelpTip";
 import { openLabChartLogViewer } from "../components/ModulesLabCharts";
@@ -10,12 +11,17 @@ import {
   readLabBgTelemetry,
   writeLabBgTelemetry,
 } from "../lib/lab-bg-telemetry";
+import {
+  readLabOnboardXorMode,
+  writeLabOnboardXorMode,
+} from "../lib/lab-onboard-xor";
 
 type Paths = Awaited<ReturnType<Window["desktop"]["getPaths"]>>;
 
 export function SettingsPage() {
   const [debug, setDebug] = useState(false);
   const [labBg, setLabBg] = useState(false);
+  const [xorMode, setXorMode] = useState<LabPollMode>(readLabOnboardXorMode);
   const [paths, setPaths] = useState<Paths | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [unlockPassword, setUnlockPassword] = useState("");
@@ -55,6 +61,17 @@ export function SettingsPage() {
         ? "Lab опрос в фоне включён — графики пишутся вне вкладки Модули"
         : "Lab опрос только на вкладке Модули"
     );
+  }
+
+  function setOnboardXorMode(next: LabPollMode) {
+    writeLabOnboardXorMode(next);
+    setXorMode(next);
+    const labels: Record<LabPollMode, string> = {
+      dense: "Всегда плотный опрос с ноутбука",
+      auto: "Авто — снижать, когда бортовой realtime доступен",
+      reduced: "Всегда сниженный опрос с ноутбука",
+    };
+    setToast(labels[next]);
   }
 
   async function openChartLog() {
@@ -175,6 +192,40 @@ export function SettingsPage() {
           <span className={`badge${labBg ? " on" : ""}`}>
             {labBg ? "опрос вне Модулей" : "только Модули"}
           </span>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="row" style={{ alignItems: "center", gap: 8 }}>
+          <h2 style={{ margin: 0 }}>Опрос модулей: ноутбук vs бортовой</h2>
+          <HelpTip controlId="settings.labOnboardXor" />
+        </div>
+        <p className="lead">
+          Когда на комплексе установлен и работает бортовой lab-logger, он уже
+          опрашивает NATS/DX плотно прямо на месте. «Авто» снижает частоту
+          опроса с ноутбука в этом случае — иначе два плотных опроса бьют по
+          одной и той же шине одновременно. Приложение остаётся рабочим,
+          просто данные на вкладке «Модули» обновляются реже.
+        </p>
+        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+          <ActionButton
+            variant={xorMode === "auto" ? "primary" : "default"}
+            onClick={() => setOnboardXorMode("auto")}
+          >
+            Авто (рекомендуется)
+          </ActionButton>
+          <ActionButton
+            variant={xorMode === "dense" ? "primary" : "default"}
+            onClick={() => setOnboardXorMode("dense")}
+          >
+            Всегда плотный
+          </ActionButton>
+          <ActionButton
+            variant={xorMode === "reduced" ? "primary" : "default"}
+            onClick={() => setOnboardXorMode("reduced")}
+          >
+            Всегда сниженный
+          </ActionButton>
         </div>
       </div>
 

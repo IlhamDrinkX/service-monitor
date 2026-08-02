@@ -40,6 +40,47 @@ export const LAB_ACTIVE_POLL_MS = 800;
 export const LAB_OTHER_STATUS_MS = 800;
 
 /**
+ * "XOR" laptop/onboard dense-poll setting (Modules Lab).
+ *
+ * When the onboard lab-logger is installed and reachable, it is already
+ * polling the complex densely from complexos itself (lower latency, no
+ * Wi-Fi/SSH-tunnel hop). The laptop's own ~800ms dual-poll (LabTelemetryController)
+ * then becomes a second dense poller hitting the same NATS/DX endpoints —
+ * this setting lets it back off instead of doubling the load.
+ *
+ * - "dense": always laptop full-rate, ignore onboard state (old behavior).
+ * - "reduced": always throttle laptop poll, regardless of onboard state.
+ * - "auto": throttle only when the onboard realtime feed is confirmed
+ *   ready (installed + unit/process active) — the actual XOR.
+ *
+ * Throttling only slows the interval; it does not stop the laptop poll or
+ * switch Modules to consume the onboard feed (that data source swap is a
+ * separate, larger follow-up) — Modules stays usable, just less dense.
+ */
+export type LabPollMode = "dense" | "auto" | "reduced";
+
+export const LAB_POLL_MODE_DEFAULT: LabPollMode = "auto";
+
+/** Reduced cadence when throttled — ~5x slower than the dense 800ms. */
+export const LAB_ACTIVE_POLL_REDUCED_MS = 4_000;
+/** DX UI current poll, reduced cadence (dense is 1s, defined in the controller). */
+export const DX_POLL_REDUCED_MS = 4_000;
+
+export function isLabPollMode(v: unknown): v is LabPollMode {
+  return v === "dense" || v === "auto" || v === "reduced";
+}
+
+/** Pure XOR decision: should the laptop's dense Lab poll be throttled down? */
+export function shouldThrottleLabPoll(
+  mode: LabPollMode,
+  onboardRealtimeReady: boolean
+): boolean {
+  if (mode === "dense") return false;
+  if (mode === "reduced") return true;
+  return onboardRealtimeReady;
+}
+
+/**
  * Dual poll plan (always-on complex telemetry, not Big-Wash-only):
  * - Active (tracked): full every tick — valves + pump + heaters + status
  * - Other tracked: on interval — status + valves + heaters + pumps

@@ -20,7 +20,10 @@ if exist "%~dp0install-windows.ps1" (
 set ERR=%ERRORLEVEL%
 echo.
 if %ERR% neq 0 (
-  echo FAILED. Re-run this script - Electron download often breaks on flaky network.
+  echo FAILED.
+  echo If you saw "spawn UNKNOWN": Windows Defender blocked the NSIS stub.
+  echo   Add exclusion for %%USERPROFILE%%\service-monitor then re-run.
+  echo Otherwise re-run - Electron download can fail on flaky network.
   echo Send the log above to the developer if it keeps failing.
 ) else (
   echo Done.

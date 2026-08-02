@@ -67,6 +67,7 @@ export const DEFAULT_LAN_MAP: ReadonlyArray<{
   },
   {
     role: "milk",
+    // Эталон .44. Не мапить milk→.33: на 4.7 Pi .33 REACHABLE, но не DX (:8000 fail).
     hostname: "milk.local",
     ip: "192.168.1.44",
     remotePort: 8000,

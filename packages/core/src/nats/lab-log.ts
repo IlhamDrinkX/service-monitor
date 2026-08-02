@@ -36,6 +36,117 @@ export function createLabEvent(
   };
 }
 
+/**
+ * Ring-buffer cap for Modules Lab event log / chart IPC sync.
+ *
+ * Was 30_000 (~15–30 min): ~17 critical channels @ ~1.2s heartbeat ≈ 14 evt/s
+ * → 30k ≈ 30 min. Target ≥12h: 12×3600×14 ≈ 605k; margin for delta bursts /
+ * tracked temps / actuators → 750_000 (~15h at that rate).
+ *
+ * With dual poll 800/800 (~25–35 evt/s) the old chart IPC cap of 30k filled in
+ * ~15 min — see LAB_EVENTS_CHART_SYNC_MAX / mergeLabChartSyncEvents.
+ *
+ * Memory: ~200–450 MB per in-memory copy of a full buffer (React state; plus
+ * chart-window sync when open). Export CSV and clear log if RAM is tight.
+ * Override via trimLabEvents(..., customMax) if needed.
+ */
+export const LAB_EVENTS_MAX = 750_000;
+
+/**
+ * IPC payload cap for the chart window (≠ ring buffer).
+ *
+ * Dual-poll complex-wide (~25–35 evt/s): 60k ≈ 30–40 min of multi-channel
+ * telemetry per sync slice. Chart window merges slices locally up to
+ * LAB_EVENTS_CHART_WINDOW_MAX so live writing continues past one sync window
+ * without cloning the full 12h ring across Electron IPC.
+ */
+export const LAB_EVENTS_CHART_SYNC_MAX = 60_000;
+
+/**
+ * Local ring in the chart window after merging successive IPC sync slices.
+ * ~250k ≈ 2h @ ~35 evt/s (or ~5h @ ~14 evt/s) without pulling LAB_EVENTS_MAX.
+ */
+export const LAB_EVENTS_CHART_WINDOW_MAX = 250_000;
+
+/** Prefer recent actuators when trimming for chart sync (sparse vs sensors). */
+export const LAB_EVENTS_SYNC_ACTUATOR_RESERVE = 8_000;
+
+/** Keep the newest `max` events (ring buffer). */
+export function trimLabEvents<T>(
+  events: readonly T[],
+  max: number = LAB_EVENTS_MAX
+): T[] {
+  if (max <= 0) return [];
+  return events.length > max ? events.slice(-max) : [...events];
+}
+
+function isActuatorLabEvent(e: LabEvent): boolean {
+  return e.kind === "valve" || e.kind === "pump" || e.kind === "heater";
+}
+
+/**
+ * Chart IPC sync trim: keep recent valve/pump/heater events, fill the rest
+ * with non-actuators, then re-sort by time so overlays stay usable.
+ * Defaults to LAB_EVENTS_CHART_SYNC_MAX (not the 12h ring) so the window
+ * stays responsive with live sensor curves.
+ *
+ * Scans only a tail when the ring is huge so sync stays O(syncMax), not O(12h).
+ */
+export function trimLabEventsForChartSync(
+  events: readonly LabEvent[],
+  max: number = LAB_EVENTS_CHART_SYNC_MAX,
+  actuatorReserve: number = LAB_EVENTS_SYNC_ACTUATOR_RESERVE
+): LabEvent[] {
+  if (max <= 0) return [];
+  const reserve = Math.max(0, Math.min(actuatorReserve, max));
+  // Tail large enough to fill sensor budget + actuator reserve (actuators sparse).
+  const scanFrom =
+    events.length > max * 3 ? Math.max(0, events.length - max * 3) : 0;
+  const scan = scanFrom > 0 ? events.slice(scanFrom) : events;
+  const actuators = scan.filter(isActuatorLabEvent);
+  const rest = scan.filter((e) => !isActuatorLabEvent(e));
+  const keepAct = actuators.slice(-reserve);
+  const keepRest = rest.slice(-(max - keepAct.length));
+  return [...keepAct, ...keepRest].sort(
+    (a, b) => Date.parse(a.at) - Date.parse(b.at)
+  );
+}
+
+/**
+ * Merge a sliding IPC sync slice into the chart window's local ring.
+ * Appends events strictly newer than the previous newest timestamp so live
+ * writing continues after the sync cap (~15–40 min) without re-sending 12h.
+ */
+export function mergeLabChartSyncEvents(
+  prev: readonly LabEvent[],
+  incoming: readonly LabEvent[],
+  max: number = LAB_EVENTS_CHART_WINDOW_MAX
+): LabEvent[] {
+  if (incoming.length === 0) {
+    // Empty sync = cleared log / empty payload — drop local accumulation.
+    return [];
+  }
+  if (prev.length === 0) {
+    return trimLabEvents([...incoming], max);
+  }
+  // Modules «Очистить лог» while chart stays open: main ring is tiny again.
+  if (prev.length > 1_000 && incoming.length <= 8) {
+    return trimLabEvents([...incoming], max);
+  }
+  const prevLastAt = Date.parse(prev[prev.length - 1]!.at);
+  if (!Number.isFinite(prevLastAt)) {
+    return trimLabEvents([...incoming], max);
+  }
+  const newer = incoming.filter((e) => {
+    const t = Date.parse(e.at);
+    return Number.isFinite(t) && t > prevLastAt;
+  });
+  if (newer.length === 0) {
+    return trimLabEvents(prev as LabEvent[], max);
+  }
+  return trimLabEvents([...prev, ...newer], max);
+}
+
 /** `milk.input` — ключ ряда для комплексных графиков. */
 export function seriesKey(module: string, name: string): string {
   return `${module}.${name}`;
@@ -88,23 +199,154 @@ function csvEscape(s: string): string {
   return s;
 }
 
+/** Точка ряда: `v: null` = разрыв (потеря связи / stale), линия не рисуется. */
+export type SeriesPoint = { t: number; v: number | null };
+
+/**
+ * Короткий hold последней величины до until (редкий heartbeat).
+ * Дольше — разрыв, без «плоской» полки last-known при NATS/DX loss.
+ * Согласовано с STALE_MS.actuators (~8s).
+ */
+export const SENSOR_SERIES_HOLD_MS = 8_000;
+
+/** DX UI (:8000) токи; остальное — NATS/status. */
+export function isDxSensorLocalName(localName: string): boolean {
+  return localName === "pumpCurrent" || localName === "pumpCurrentL";
+}
+
+export function isFiniteSeriesValue(
+  v: number | null | undefined
+): v is number {
+  return v != null && Number.isFinite(v);
+}
+
+/** Y-domain from finite samples only (all-null → fallback). */
+export function seriesYDomain(
+  points: ReadonlyArray<{ v: number | null | undefined }>,
+  fallback: { min: number; max: number } = { min: 0, max: 1 }
+): { min: number; max: number } {
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  for (const p of points) {
+    if (!isFiniteSeriesValue(p.v)) continue;
+    if (p.v < min) min = p.v;
+    if (p.v > max) max = p.v;
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    return { ...fallback };
+  }
+  if (max === min) {
+    min -= 1;
+    max += 1;
+  }
+  const pad = (max - min) * 0.08;
+  return { min: min - pad, max: max + pad };
+}
+
+/**
+ * SVG path for a series: null/non-finite breaks the segment (new M after gap).
+ * Does not coerce null → 0.
+ */
+export function seriesPathD(
+  points: ReadonlyArray<SeriesPoint>,
+  xOf: (t: number) => number,
+  yOf: (v: number) => number
+): string {
+  let d = "";
+  let drawing = false;
+  for (const point of points) {
+    if (!isFiniteSeriesValue(point.v)) {
+      drawing = false;
+      continue;
+    }
+    const cmd = drawing ? "L" : "M";
+    d += `${cmd}${xOf(point.t).toFixed(1)},${yOf(point.v).toFixed(1)}`;
+    drawing = true;
+  }
+  return d;
+}
+
+/** True if at least one drawable (finite) sample exists. */
+export function seriesHasDrawablePoints(
+  points: ReadonlyArray<{ v: number | null | undefined }>
+): boolean {
+  return points.some((p) => isFiniteSeriesValue(p.v));
+}
+
+/** Trim to `limit`, but never drop the last finite sample if the tail is all gaps. */
+function sliceSeriesPreservingFinite(
+  pts: SeriesPoint[],
+  limit: number
+): SeriesPoint[] {
+  if (pts.length <= limit) return pts;
+  const sliced = pts.slice(-limit);
+  if (seriesHasDrawablePoints(sliced)) return sliced;
+  let lastFinite = -1;
+  for (let i = pts.length - 1; i >= 0; i--) {
+    if (isFiniteSeriesValue(pts[i]!.v)) {
+      lastFinite = i;
+      break;
+    }
+  }
+  if (lastFinite < 0) return sliced;
+  const from = Math.max(0, lastFinite - Math.floor(limit / 2));
+  return pts.slice(from, from + limit);
+}
+
+/**
+ * Достроить конец ряда до until: короткий hold, иначе gap (null).
+ * Не тянем last-known бесконечно — иначе при обрыве NATS кривая «залипает».
+ */
+export function extendSeriesEnd(
+  pts: SeriesPoint[],
+  until: number,
+  holdMs = SENSOR_SERIES_HOLD_MS
+): SeriesPoint[] {
+  if (pts.length === 0) return pts;
+  const last = pts[pts.length - 1]!;
+  if (last.t >= until) return pts;
+  if (last.v == null) {
+    if (last.t < until) pts.push({ t: until, v: null });
+    return pts;
+  }
+  const holdUntil = Math.min(until, last.t + holdMs);
+  if (holdUntil > last.t) {
+    pts.push({ t: holdUntil, v: last.v });
+  }
+  if (holdUntil < until) {
+    // Gap after hold: one null at hold end (path break) + null at until.
+    // Avoid duplicate finite+null only when hold point was not added (holdUntil===last.t).
+    const gapStart = pts[pts.length - 1]!;
+    if (gapStart.v != null || gapStart.t < holdUntil) {
+      pts.push({ t: holdUntil, v: null });
+    }
+    pts.push({ t: until, v: null });
+  }
+  return pts;
+}
+
 /**
  * Точки датчика: key = `milk.input` или короткое `input`.
- * Учитывает значение до окна since (hold) и тянет последнюю точку до untilMs,
- * иначе слева окна пусто при редких сэмплах.
+ * Учитывает значение до окна since (baseline) и короткий hold до untilMs.
+ * `value: null` в событии → разрыв кривой (потеря телеметрии).
  */
 export function sensorSeries(
   events: LabEvent[],
   sensorName: string,
   limit = 2000,
   sinceMs?: number | null,
-  untilMs?: number | null
-): Array<{ t: number; v: number }> {
-  const matching: Array<{ t: number; v: number }> = [];
+  untilMs?: number | null,
+  holdMs = SENSOR_SERIES_HOLD_MS
+): SeriesPoint[] {
+  const matching: SeriesPoint[] = [];
   for (const e of events) {
     if (!eventMatchesSeries(e, sensorName, "sensor")) continue;
     const t = Date.parse(e.at);
     if (!Number.isFinite(t)) continue;
+    if (e.value === null || e.value === undefined) {
+      matching.push({ t, v: null });
+      continue;
+    }
     const n = typeof e.value === "number" ? e.value : Number(e.value);
     if (!Number.isFinite(n)) continue;
     matching.push({ t, v: n });
@@ -113,8 +355,8 @@ export function sensorSeries(
 
   const since = sinceMs ?? null;
   const until = untilMs ?? null;
-  let baseline: { t: number; v: number } | null = null;
-  const inWindow: Array<{ t: number; v: number }> = [];
+  let baseline: SeriesPoint | null = null;
+  const inWindow: SeriesPoint[] = [];
   for (const p of matching) {
     if (since != null && p.t < since) {
       baseline = p;
@@ -124,18 +366,28 @@ export function sensorSeries(
     inWindow.push(p);
   }
 
-  const pts: Array<{ t: number; v: number }> = [];
+  const pts: SeriesPoint[] = [];
   if (baseline != null && since != null) {
     pts.push({ t: since, v: baseline.v });
   }
-  for (const p of inWindow) pts.push(p);
+  let prevNull = pts.length > 0 && pts[pts.length - 1]!.v == null;
+  for (const p of inWindow) {
+    // Collapse consecutive null gap heartbeats — keep the first & allow path break.
+    if (p.v == null) {
+      if (prevNull) continue;
+      prevNull = true;
+      pts.push(p);
+      continue;
+    }
+    prevNull = false;
+    pts.push(p);
+  }
   if (pts.length === 0) return [];
 
   if (until != null) {
-    const last = pts[pts.length - 1]!;
-    if (last.t < until) pts.push({ t: until, v: last.v });
+    extendSeriesEnd(pts, until, holdMs);
   }
-  return pts.length > limit ? pts.slice(-limit) : pts;
+  return sliceSeriesPreservingFinite(pts, limit);
 }
 
 /** Окно времени для масштаба графика. */
@@ -220,12 +472,13 @@ export function pumpPowerSeries(
   sinceMs?: number | null,
   limit = 2000,
   module?: string | null,
-  untilMs?: number | null
-): Array<{ t: number; v: number }> {
-  const matching: Array<{ t: number; v: number }> = [];
+  untilMs?: number | null,
+  holdMs = SENSOR_SERIES_HOLD_MS
+): SeriesPoint[] {
+  const matching: SeriesPoint[] = [];
   const since = sinceMs ?? null;
   const until = untilMs ?? null;
-  let baseline: { t: number; v: number } | null = null;
+  let baseline: SeriesPoint | null = null;
   for (const e of events) {
     if (e.kind !== "pump" || e.name !== "pump") continue;
     if (module && e.module !== module) continue;
@@ -248,15 +501,13 @@ export function pumpPowerSeries(
     if (until != null && t > until) continue;
     matching.push({ t, v: power });
   }
-  const pts: Array<{ t: number; v: number }> = [];
+  const pts: SeriesPoint[] = [];
   if (baseline != null && since != null) {
     pts.push({ t: since, v: baseline.v });
   }
   for (const p of matching) pts.push(p);
   if (pts.length === 0) return [];
-  const stepped: Array<{ t: number; v: number }> = [
-    { t: pts[0]!.t, v: pts[0]!.v },
-  ];
+  const stepped: SeriesPoint[] = [{ t: pts[0]!.t, v: pts[0]!.v }];
   for (let i = 1; i < pts.length; i++) {
     const prev = pts[i - 1]!;
     const cur = pts[i]!;
@@ -264,10 +515,9 @@ export function pumpPowerSeries(
     stepped.push(cur);
   }
   if (until != null) {
-    const last = stepped[stepped.length - 1]!;
-    if (last.t < until) stepped.push({ t: until, v: last.v });
+    extendSeriesEnd(stepped, until, holdMs);
   }
-  return stepped.length > limit ? stepped.slice(-limit) : stepped;
+  return sliceSeriesPreservingFinite(stepped, limit);
 }
 
 export type ChartSeriesMeta = {

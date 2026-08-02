@@ -4,6 +4,8 @@
 # Usage:
 #   bash scripts/bootstrap.sh
 #
+# On Windows use: scripts/bootstrap.cmd  (or bootstrap.ps1)
+#
 # Env:
 #   SERVICE_MONITOR_REPO      — git URL (default: https://github.com/IlhamDrinkX/service-monitor.git)
 #   SERVICE_MONITOR_DIR       — install dir
@@ -94,10 +96,37 @@ sync_repo() {
   fi
 }
 
+npm_install_retry() {
+  export npm_config_fetch_retries=5
+  export npm_config_fetch_retry_mintimeout=20000
+  export npm_config_fetch_retry_maxtimeout=120000
+
+  local attempt
+  for attempt in 1 2 3; do
+    step "npm install (attempt ${attempt}/3)"
+    if npm install --legacy-peer-deps; then
+      return 0
+    fi
+    echo "npm install failed (often network / Electron). Retrying…"
+    rm -rf "${ROOT}/node_modules/electron" 2>/dev/null || true
+    sleep $((attempt * 5))
+  done
+  echo "npm install failed after 3 attempts." >&2
+  exit 1
+}
+
+prepare_electron_builder_env() {
+  # No code-signing cert in this project; avoid hung auto-discovery
+  export CSC_IDENTITY_AUTO_DISCOVERY=false
+  local release="${ROOT}/apps/desktop/release"
+  if [[ -d "${release}" ]]; then
+    rm -rf "${release:?}/"*
+  fi
+}
+
 install_and_build() {
   cd "${ROOT}"
-  step "npm install"
-  npm install --legacy-peer-deps
+  npm_install_retry
 
   step "build core + desktop"
   npm run build -w @service-monitor/core
@@ -110,12 +139,14 @@ install_and_build() {
 
   local os
   os="$(uname -s)"
+  prepare_electron_builder_env
   if [[ "${os}" == "Darwin" ]]; then
     step "electron-builder (macOS)"
     npm run dist:mac -w @service-monitor/desktop
   else
-    step "electron-builder (current OS)"
-    npm run dist -w @service-monitor/desktop
+    echo "No Linux installer target yet. Built app is under apps/desktop/out — use SKIP_DIST=1 or run on macOS/Windows." >&2
+    echo "Skipping electron-builder on $(uname -s)."
+    return
   fi
 
   local release="${ROOT}/apps/desktop/release"

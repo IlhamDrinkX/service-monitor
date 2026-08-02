@@ -9,6 +9,7 @@ export * from "./ssh/config-generator.js";
 export * from "./security/write-gate.js";
 // password (node:crypto) — импорт только в Electron main:
 //   import { verifyServicePassword } from "@service-monitor/core/security/password"
+//   import { verifyCashDevPassword } from "@service-monitor/core/security/cash-dev-password"
 export * from "./hints/param-hints.js";
 export * from "./help/content.js";
 export * from "./profiles/complex-profile.js";
@@ -24,6 +25,8 @@ export * from "./nats/heater-warmup.js";
 export * from "./nats/complex-status.js";
 export * from "./nats/chart-layout.js";
 export * from "./nats/complexos-subjects.js";
+export * from "./nats/sirup.js";
+export * from "./nats/pos.js";
 export * from "./nats/terminal-presets.js";
 export * from "./nats/lab-scenarios.js";
 export * from "./nats/dx-ui-stat.js";

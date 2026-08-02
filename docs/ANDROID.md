@@ -30,7 +30,7 @@ Skeleton: [`apps/android`](../apps/android) — shared types/helpers из `@serv
 3. **Secure storage** — ERP token
 4. **dozator** — отдельный SSH Host для syrup/flash (или LAN)
 
-Контракт IPC desktop → ориентир API: `natsConnect`, `natsRequest`, `syrupModbusScan`, `flashPartA/B`, `drinkxRead/Write`, `sessionConnect`.
+Контракт IPC desktop → ориентир API: `natsConnect`, `natsRequest`, `syrupCheckSsh`, `syrupModbusScan`, `flashPartA`/`flashPartB`, `drinkxRead`/`Write`, `sessionConnect`.
 
 ## Запуск каркаса
 

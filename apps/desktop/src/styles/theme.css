@@ -528,6 +528,278 @@ textarea.code-editor {
   gap: 8px;
 }
 
+/* Compact syrup motor picker (NATS complexos.sirup) */
+.sirup-chip-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(52px, 1fr));
+  gap: 6px;
+  max-height: 220px;
+  overflow: auto;
+  padding: 2px;
+}
+
+.sirup-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: 44px;
+  padding: 6px 4px;
+  margin: 0;
+  border-radius: 8px;
+  border: 1px solid var(--stroke);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  line-height: 1.1;
+}
+
+.sirup-chip:hover {
+  border-color: var(--accent, #5b8def);
+}
+
+.sirup-chip.selected {
+  border-color: var(--accent, #5b8def);
+  box-shadow: inset 0 0 0 1px var(--accent, #5b8def);
+}
+
+.sirup-chip-id {
+  font-weight: 650;
+  font-size: 0.95rem;
+}
+
+.sirup-chip-st {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.sirup-chip.on .sirup-chip-st {
+  color: #2dd4a0;
+}
+
+.sirup-chip.unk .sirup-chip-st,
+.sirup-chip.noreply .sirup-chip-st {
+  color: #7a8699;
+}
+
+.sirup-chip.noreply {
+  opacity: 0.72;
+}
+
+.sirup-chip.off .sirup-chip-st {
+  color: var(--text-muted);
+}
+
+.sirup-chip.idle .sirup-chip-st {
+  color: #546178;
+}
+
+.sirup-presets {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.sirup-preset-btn {
+  padding: 5px 8px !important;
+  font-size: 0.8rem !important;
+}
+
+.sirup-log-wrap {
+  margin-top: 12px;
+}
+
+.sirup-log-head {
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+  gap: 8px;
+}
+
+.sirup-action-log {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  background: #0a0e13;
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  color: #b7c9b0;
+  margin: 0;
+}
+
+/* Компактный ряд: поле + кнопка + ? на одной линии с инпутом */
+.unlock-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.unlock-row .field-compact {
+  flex: 0 0 auto;
+  min-width: 0;
+  width: 240px;
+  max-width: 280px;
+}
+
+.unlock-row .field-compact input {
+  width: 100%;
+}
+
+.unlock-row .badge {
+  align-self: center;
+  margin-bottom: 2px;
+}
+
+/* Касса / ККТ */
+.pos-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.pos-status-card {
+  background: var(--bg-soft);
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+
+.pos-status-card.ok {
+  border-color: rgba(110, 207, 140, 0.45);
+}
+
+.pos-status-card.warn {
+  border-color: rgba(224, 163, 90, 0.55);
+}
+
+.pos-status-card.error {
+  border-color: rgba(224, 100, 100, 0.55);
+}
+
+.pos-status-card.stub {
+  opacity: 0.75;
+  border-style: dashed;
+}
+
+.pos-status-card-title {
+  font-family: var(--font-ui);
+  font-weight: 600;
+  font-size: 0.92rem;
+  margin-bottom: 6px;
+}
+
+.pos-status-card ul {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.confirm-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: rgba(6, 10, 14, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.confirm-modal {
+  width: min(480px, 100%);
+  background: var(--bg-elevated);
+  border: 1px solid var(--stroke-strong);
+  border-radius: 14px;
+  padding: 18px 20px 16px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+}
+
+.confirm-modal h2 {
+  margin: 0 0 10px;
+  font-size: 1.15rem;
+}
+
+.confirm-modal-danger {
+  margin: 0 0 12px;
+  color: var(--warn);
+  font-size: 0.95rem;
+  line-height: 1.45;
+}
+
+.confirm-modal-cheat {
+  background: var(--bg-soft);
+  border: 1px solid var(--stroke);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+}
+
+.confirm-modal-cheat-label {
+  font-family: var(--font-ui);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.confirm-modal-cheat ul {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.confirm-modal-actions {
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.btn.danger-confirm {
+  background: rgba(224, 113, 113, 0.22);
+  border-color: rgba(224, 113, 113, 0.55);
+  color: #f0c0c0;
+}
+
+.btn.danger-confirm:hover:not(:disabled) {
+  background: rgba(224, 113, 113, 0.35);
+}
+
+.stand-disclosure {
+  padding-top: 12px !important;
+  padding-bottom: 12px !important;
+}
+
+.stand-disclosure-btn {
+  flex: 1;
+  justify-content: flex-start;
+  font-weight: 600;
+  text-align: left;
+}
+
+.stand-disclosure-chevron {
+  display: inline-block;
+  width: 1.1em;
+  color: var(--text-muted);
+}
+
+.stand-disclosure-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+
 .device-row {
   display: grid;
   grid-template-columns: 18px 1fr auto;
@@ -1199,6 +1471,14 @@ textarea.code-editor {
 
 .lab-spark-interactive {
   cursor: crosshair;
+}
+
+.lab-chart-marker {
+  pointer-events: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  filter: drop-shadow(0 0 1px color-mix(in srgb, var(--accent) 55%, transparent));
 }
 
 .lab-chart-slice-board {

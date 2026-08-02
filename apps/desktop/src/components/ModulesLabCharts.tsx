@@ -6,12 +6,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   chartSeriesMeta,
+  isFiniteSeriesValue,
   layoutModuleChartKeys,
+  mergeLabChartSyncEvents,
   moduleChartColumns,
   parseSeriesKey,
   pumpPowerSeries,
   sensorSeries,
+  seriesHasDrawablePoints,
   seriesKey,
+  seriesPathD,
+  seriesYDomain,
+  trimLabEventsForChartSync,
   type DrinkxHost,
   type LabEvent,
 } from "@service-monitor/core";
@@ -25,9 +31,12 @@ export { EMPTY_LAB_CHART_PAYLOAD };
 
 /**
  * Открыть окно графика для просмотра/импорта лога без живой сессии.
- * Пустой payload — «Импорт лога»; если в main уже есть последний sync — подтянется.
+ * Если передан livePayload — синхронизируем его (кнопка «Лог графика» на Modules).
+ * Иначе: пустой payload для «Импорт лога»; если в main уже есть последний sync — подтянется.
  */
-export async function openLabChartLogViewer(): Promise<{
+export async function openLabChartLogViewer(
+  livePayload?: LabChartSyncPayload | null
+): Promise<{
   ok: boolean;
   error?: string;
 }> {
@@ -39,11 +48,21 @@ export async function openLabChartLogViewer(): Promise<{
     };
   }
   try {
-    const current = await window.desktop.pullLabChartState?.();
-    if (!current || typeof current !== "object") {
-      await window.desktop.syncLabChartState?.(EMPTY_LAB_CHART_PAYLOAD);
+    if (livePayload && livePayload.events.length > 0) {
+      await window.desktop.syncLabChartState?.(livePayload);
+    } else {
+      const current = await window.desktop.pullLabChartState?.();
+      if (!current || typeof current !== "object") {
+        await window.desktop.syncLabChartState?.(EMPTY_LAB_CHART_PAYLOAD);
+      }
     }
-    const res = await window.desktop.openLabChartWindow({});
+    const focus =
+      livePayload?.initialSensor ??
+      livePayload?.allSensors[0] ??
+      null;
+    const res = await window.desktop.openLabChartWindow(
+      focus ? { focusSensor: focus } : {}
+    );
     if (res && "ok" in res && res.ok === false) {
       return { ok: false, error: res.error || "Не удалось открыть окно" };
     }
@@ -68,9 +87,6 @@ type Props = {
   liveActuators?: LabChartSyncPayload["liveActuators"];
 };
 
-/** Синхронизация в окно графика: хватает на 15+ мин многоканальной сессии. */
-const SYNC_MAX_EVENTS = 30_000;
-
 function buildSyncPayload(
   events: LabEvent[],
   allSensors: string[],
@@ -79,26 +95,35 @@ function buildSyncPayload(
   heaterIds: string[],
   liveActuators?: LabChartSyncPayload["liveActuators"]
 ): LabChartSyncPayload {
-  // Клапаны/насосы не выкидывать при обрезке — иначе оверлеи пустые.
-  const actuators = events.filter(
-    (e) => e.kind === "valve" || e.kind === "pump" || e.kind === "heater"
-  );
-  const rest = events.filter(
-    (e) => e.kind !== "valve" && e.kind !== "pump" && e.kind !== "heater"
-  );
-  const keepAct = actuators.slice(-8_000);
-  const keepRest = rest.slice(-(SYNC_MAX_EVENTS - keepAct.length));
-  const trimmed = [...keepAct, ...keepRest].sort(
-    (a, b) => Date.parse(a.at) - Date.parse(b.at)
-  );
   return {
-    events: trimmed,
+    events: trimLabEventsForChartSync(events),
     allSensors,
     initialSensor: focus,
     valvesMap,
     heaterIds,
     liveActuators,
   };
+}
+
+/** Собрать payload для IPC окна графика (Modules toolbar / charts). */
+export function buildLabChartSyncPayload(
+  events: LabEvent[],
+  allSensors: string[],
+  opts?: {
+    focus?: string | null;
+    valvesMap?: Record<DrinkxHost, string[]>;
+    heaterIds?: string[];
+    liveActuators?: LabChartSyncPayload["liveActuators"];
+  }
+): LabChartSyncPayload {
+  return buildSyncPayload(
+    events,
+    allSensors,
+    opts?.focus ?? allSensors[0] ?? null,
+    opts?.valvesMap ?? { milk: [], coffee: [], water: [] },
+    opts?.heaterIds ?? [],
+    opts?.liveActuators
+  );
 }
 
 export function ModulesLabCharts({
@@ -115,7 +140,23 @@ export function ModulesLabCharts({
   const [modalFallback, setModalFallback] = useState(false);
   const [focus, setFocus] = useState<string | null>(null);
   const [openError, setOpenError] = useState<string | null>(null);
-  const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Latest sync inputs — interval must NOT reset on every events render. */
+  const syncLatest = useRef({
+    events,
+    allSensors,
+    focus,
+    valvesMap,
+    heaterIds,
+    liveActuators,
+  });
+  syncLatest.current = {
+    events,
+    allSensors,
+    focus,
+    valvesMap,
+    heaterIds,
+    liveActuators,
+  };
 
   const valvesMap = useMemo(() => {
     if (valveIdsByModule) return valveIdsByModule;
@@ -202,41 +243,30 @@ export function ModulesLabCharts({
     return () => offClosed?.();
   }, []);
 
+  /**
+   * Stable throttle: deps only [chartOpen]. Previously debounce(400) + interval
+   * listed `events`/`liveActuators` and reset on every poll emit — under dual
+   * poll (~800ms, multiple emits/tick) the timer never fired, so the chart
+   * window froze on the open-time slice (~15 min of data at 30k/33 evt/s).
+   */
   useEffect(() => {
     if (!chartOpen) return;
-    if (syncTimer.current) clearTimeout(syncTimer.current);
-    syncTimer.current = setTimeout(() => {
+    const push = () => {
+      const s = syncLatest.current;
       const payload = buildSyncPayload(
-        events,
-        allSensors,
-        focus,
-        valvesMap,
-        heaterIds,
-        liveActuators
+        s.events,
+        s.allSensors,
+        s.focus,
+        s.valvesMap,
+        s.heaterIds,
+        s.liveActuators
       );
       void window.desktop.syncLabChartState?.(payload);
-    }, 400);
-    return () => {
-      if (syncTimer.current) clearTimeout(syncTimer.current);
     };
-  }, [chartOpen, events, allSensors, focus, valvesMap, heaterIds, liveActuators]);
-
-  /** Heartbeat: даже если React не пересоздал events, подтягиваем срез в окно. */
-  useEffect(() => {
-    if (!chartOpen) return;
-    const id = setInterval(() => {
-      const payload = buildSyncPayload(
-        events,
-        allSensors,
-        focus,
-        valvesMap,
-        heaterIds,
-        liveActuators
-      );
-      void window.desktop.syncLabChartState?.(payload);
-    }, 1500);
+    push();
+    const id = setInterval(push, 1000);
     return () => clearInterval(id);
-  }, [chartOpen, events, allSensors, focus, valvesMap, heaterIds, liveActuators]);
+  }, [chartOpen]);
 
   if (sensorNames.length === 0) {
     return (
@@ -309,19 +339,25 @@ export function ModulesLabCharts({
 
   function renderCard(name: string) {
     const { module, name: local } = parseSeriesKey(name);
-    let pts = sensorSeries(events, name, 100);
-    if (local === "pumpPower" && pts.length < 2 && module) {
-      const fromPump = pumpPowerSeries(events, null, 100, module);
-      if (fromPump.length > pts.length) pts = fromPump;
+    const until = Date.now();
+    const since = until - 60_000;
+    let pts = sensorSeries(events, name, 100, since, until);
+    if (local === "pumpPower" && pts.filter((p) => p.v != null).length < 2 && module) {
+      const fromPump = pumpPowerSeries(events, since, 100, module, until);
+      if (fromPump.filter((p) => p.v != null).length > pts.filter((p) => p.v != null).length) {
+        pts = fromPump;
+      }
     }
-    if (pts.length === 1) {
-      const p = pts[0]!;
+    const finite = pts.filter((p) => isFiniteSeriesValue(p.v));
+    if (finite.length === 1) {
+      const p = finite[0]!;
       pts = [
         { t: p.t - 1000, v: p.v },
         { t: p.t, v: p.v },
       ];
     }
     const meta = chartSeriesMeta(name);
+    const drawable = seriesHasDrawablePoints(pts);
     return (
       <button
         key={name}
@@ -337,12 +373,12 @@ export function ModulesLabCharts({
             {meta.unit ? ` · ${meta.unit}` : ""}
           </span>
         </div>
-        {pts.length < 2 ? (
+        {!drawable ? (
           <p className="muted" style={{ margin: 0, fontSize: "0.85rem" }}>
-            мало точек ({pts.length}) — клик для окна
+            мало точек — клик для окна
           </p>
         ) : (
-          <Sparkline points={pts} height={72} />
+          <Sparkline points={pts} until={until} height={72} />
         )}
       </button>
     );
@@ -465,15 +501,19 @@ export function LabChartWindowPage() {
   });
 
   useEffect(() => {
+    const applySync = (raw: unknown) => {
+      if (!raw || typeof raw !== "object") return;
+      const next = raw as LabChartSyncPayload;
+      setPayload((prev) => ({
+        ...next,
+        events: mergeLabChartSyncEvents(prev.events, next.events ?? []),
+      }));
+    };
     void window.desktop.pullLabChartState?.().then((raw) => {
-      if (raw && typeof raw === "object") {
-        setPayload(raw as LabChartSyncPayload);
-      }
+      applySync(raw);
     });
     const offState = window.desktop.onLabChartState?.((raw) => {
-      if (raw && typeof raw === "object") {
-        setPayload(raw as LabChartSyncPayload);
-      }
+      applySync(raw);
     });
     const offFocus = window.desktop.onLabChartFocus?.((p) => {
       if (p.focusSensor) setFocus(p.focusSensor);
@@ -484,10 +524,16 @@ export function LabChartWindowPage() {
     };
   }, []);
 
+  const initial =
+    focus ??
+    payload.initialSensor ??
+    payload.allSensors[0] ??
+    null;
+
   return (
     <LabChartPanel
       {...payload}
-      initialSensor={focus ?? payload.initialSensor}
+      initialSensor={initial}
       windowMode
     />
   );
@@ -495,25 +541,40 @@ export function LabChartWindowPage() {
 
 function Sparkline({
   points,
+  until,
   height = 72,
 }: {
-  points: Array<{ t: number; v: number }>;
+  points: Array<{ t: number; v: number | null }>;
+  until: number;
   height?: number;
 }) {
   const w = 320;
   const h = height;
   const pad = 4;
-  const vs = points.map((p) => p.v);
-  const min = Math.min(...vs);
-  const max = Math.max(...vs);
+  if (!seriesHasDrawablePoints(points)) {
+    return (
+      <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} className="lab-spark">
+        <text x={pad} y={h / 2} fill="var(--text-muted)" fontSize="11">
+          —
+        </text>
+      </svg>
+    );
+  }
+  const { min, max } = seriesYDomain(points);
   const span = max - min || 1;
-  const path = points
-    .map((p, i) => {
-      const x = pad + (i / (points.length - 1)) * (w - pad * 2);
-      const y = h - pad - ((p.v - min) / span) * (h - pad * 2);
-      return `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(" ");
+  const t0 = Math.min(points[0]!.t, until - 1_000);
+  const t1 = Math.max(until, points[points.length - 1]!.t);
+  const tSpan = t1 - t0 || 1;
+  const path = seriesPathD(
+    points,
+    (t) => pad + ((t - t0) / tSpan) * (w - pad * 2),
+    (v) => h - pad - ((v - min) / span) * (h - pad * 2)
+  );
+  const lastFinite = [...points].reverse().find((p) => isFiniteSeriesValue(p.v))!;
+  const currentLabel =
+    lastFinite.t < until - 2_000
+      ? "—"
+      : (lastFinite.v as number).toFixed(2);
   return (
     <svg
       viewBox={`0 0 ${w} ${h}`}
@@ -524,6 +585,9 @@ function Sparkline({
       <path d={path} fill="none" stroke="var(--accent)" strokeWidth="2" />
       <text x={pad} y={12} fill="var(--text-muted)" fontSize="10">
         {max.toFixed(2)}
+      </text>
+      <text x={w - pad - 36} y={12} fill="var(--text-muted)" fontSize="10">
+        {currentLabel}
       </text>
       <text x={pad} y={h - 2} fill="var(--text-muted)" fontSize="10">
         {min.toFixed(2)}

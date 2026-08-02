@@ -1,9 +1,10 @@
 /**
- * Дозатор (Modbus/flash) и flash_obraz — отдельная вкладка навигации.
+ * Дозатор: NATS-сиропы на комплексе + стенд Modbus/flash + legacy окна.
  */
 
 import { useState } from "react";
 import { ActionButton } from "../components/ActionButton";
+import { ComplexSirupPanel } from "../components/ComplexSirupPanel";
 import { HelpTip } from "../components/HelpTip";
 import { SyrupFlashPanel } from "../components/SyrupFlashPanel";
 import { useComplexSession } from "../state/useComplexSession";
@@ -18,18 +19,20 @@ export function PeripheralsPage() {
   const [toast, setToast] = useState<{ text: string; error?: boolean } | null>(
     null
   );
+  /** Стенд Modbus/flash — свёрнут по умолчанию, чтобы не путать с полевым NATS */
+  const [standOpen, setStandOpen] = useState(false);
 
   return (
     <div className="stack">
       <div className={`panel${warn ? " panel-warn" : ""}`}>
         <h2 className="row" style={{ gap: 8, alignItems: "center" }}>
-          Дозатор · Flash
+          Дозатор
           <HelpTip controlId="nav.peripherals" />
         </h2>
         <p className="lead">
-          Сиропный dozator по SSH (Modbus / flash partA·B) и legacy{" "}
-          <code>flash_obraz</code>. Нужна сессия комплекса и Host{" "}
-          <code>dozator</code> / <code>ansible</code> в ssh config.
+          На готовом комплексе — сиропы через NATS (<code>complexos.sirup.*</code>
+          ). Стенд прошивки (Host <code>dozator</code>) — ниже, свёрнут.
+          Legacy: <code>flash_obraz</code> / <code>sirup_test</code>.
         </p>
         {toast ? (
           <div className={`toast${toast.error ? " error" : ""}`}>
@@ -38,11 +41,42 @@ export function PeripheralsPage() {
         ) : null}
       </div>
 
-      <SyrupFlashPanel
+      <ComplexSirupPanel
         busy={busy}
         setBusy={setBusy}
         onToast={(t) => setToast(t)}
       />
+
+      <div className="panel panel-compact stand-disclosure">
+        <div className="row" style={{ gap: 8, alignItems: "center" }}>
+          <button
+            type="button"
+            className="btn stand-disclosure-btn"
+            aria-expanded={standOpen}
+            onClick={() => setStandOpen((v) => !v)}
+          >
+            <span className="stand-disclosure-chevron" aria-hidden>
+              {standOpen ? "▾" : "▸"}
+            </span>
+            Стенд dozator (Modbus / прошивка)
+          </button>
+          <HelpTip controlId="modules.syrup" />
+        </div>
+        {!standOpen ? (
+          <p className="muted stand-disclosure-hint">
+            Только для стенда прошивки плат (Host <code>dozator</code>), не для
+            полевых сиропов на комплексе.
+          </p>
+        ) : null}
+      </div>
+
+      {standOpen ? (
+        <SyrupFlashPanel
+          busy={busy}
+          setBusy={setBusy}
+          onToast={(t) => setToast(t)}
+        />
+      ) : null}
 
       <div className="panel">
         <h2 className="row" style={{ gap: 8, alignItems: "center" }}>
@@ -67,28 +101,6 @@ export function PeripheralsPage() {
             }
           >
             Открыть flash_obraz
-          </ActionButton>
-          <ActionButton
-            className="btn-compact"
-            disabled={busy !== null}
-            onClick={() =>
-              void window.desktop
-                .launchFleetTool({ tool: "sirup_test" })
-                .catch((e) => setToast({ text: errText(e), error: true }))
-            }
-          >
-            sirup_test (окно)
-          </ActionButton>
-          <ActionButton
-            className="btn-compact"
-            disabled={busy !== null}
-            onClick={() =>
-              void window.desktop
-                .launchFleetTool({ tool: "flash_sirup" })
-                .catch((e) => setToast({ text: errText(e), error: true }))
-            }
-          >
-            flash_sirup (окно)
           </ActionButton>
         </div>
       </div>

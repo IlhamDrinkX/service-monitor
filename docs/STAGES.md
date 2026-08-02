@@ -45,14 +45,15 @@
 - После записи `drinkx.json` — best-effort `systemctl`/`pm2` restart cm-drv
 - Subjects + device map в `@service-monitor/core` (`nats/subjects.ts`, `nats/module-devices.ts`)
 
-## Stage 6 — Syrup panel / polish / flash / Android stub
+## Stage 6 — Syrup panel / polish / flash / Android stub ✅
 
-- Полная UI-панель сиропа: scan/motor params + лог
-- Общий `dozator-ssh` helper (syrup + flash)
-- Auto-connect NATS на вкладке Модули при готовой сессии
-- In-app **flash_sirup** partA/partB + stream лога; `flash_obraz` — legacy launch + справка
-- Каркас `apps/android` + контракт native bridge (`docs/ANDROID.md`)
-- electron-builder релиз-пайплайн — отложен
+Порядок 3 → 4 → 1 → 5 (закрыто):
+
+- **3** Полная UI-панель сиропа (Дозатор → стенд): scan/motor params + лог; `dozator-ssh`
+- **4** Auto-connect NATS на вкладке Модули (`useModulesLabNats`); docs обновлены
+- **1** In-app flash partA/partB + `flash:log`; legacy `flash_sirup`/`sirup_test` свёрнуты; `flash_obraz` — launch + справка
+- **5** Каркас `apps/android` + bridge contract (`docs/ANDROID.md`)
+- electron-builder релиз-пайплайн — отложен (вне скоупа)
 
 ## Stage 7 — ComplexOS + Lab terminal / complex telemetry
 
@@ -79,8 +80,8 @@
 ## Stage 9 — LabTelemetry / DX UI currents / actuator stability (dev2)
 
 - Один владелец опроса: `LabTelemetryController` + `useLabTelemetry`
-  - NATS ~1.1s: status many + valves + pumps + heaters
-  - DX UI ~1.5s: только `pump_R_IS` / `pump_L_IS` (HTTP :8000 / туннель; SSH fallback)
+  - NATS ~800ms (active + other tracked): status + valves + pumps + heaters
+  - DX UI ~1s: только `pump_R_IS` / `pump_L_IS` (HTTP :8000 / туннель; SSH fallback)
   - `pause` abort только NATS; DX ток не стопорится на START насоса
 - Heater PWM в Lab = оценка PidClassic.start (25–75%), не DX graph lastlog
 - Pump START/STOP: session cancel, optimistic power %, burst DX

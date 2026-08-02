@@ -510,22 +510,37 @@ export function extractWaterPressure(
  * Ток насоса (pump_R_IS) — deep-search в status.
  * cm-drv getStatus обычно не кладёт R_IS в sensors; ищем ключи в дереве.
  */
-export function extractPumpCurrent(statusResponse: unknown): number | null {
+export function extractPumpCurrent(
+  statusResponse: unknown,
+  host?: DrinkxHost | null
+): number | null {
   if (statusResponse == null) return null;
 
-  for (const sensor of extractStatusSensors(statusResponse)) {
-    const normalizedName = String(sensor?.name || "")
-      .replace(/\s+/g, "")
-      .replace(/[{}]/g, "")
-      .toLowerCase();
-    if (
-      normalizedName.endsWith("pump_r_is") ||
-      normalizedName === "pump_r_is" ||
-      normalizedName.endsWith("pump_current") ||
-      normalizedName.includes("pump_r_is")
-    ) {
-      const n = Number(sensor.value);
-      if (Number.isFinite(n)) return n;
+  const sensorLists =
+    host != null
+      ? [extractStatusSensors(statusResponse, host)]
+      : [
+          extractStatusSensors(statusResponse),
+          extractStatusSensors(statusResponse, "milk"),
+          extractStatusSensors(statusResponse, "coffee"),
+          extractStatusSensors(statusResponse, "water"),
+        ];
+
+  for (const sensors of sensorLists) {
+    for (const sensor of sensors) {
+      const normalizedName = String(sensor?.name || "")
+        .replace(/\s+/g, "")
+        .replace(/[{}]/g, "")
+        .toLowerCase();
+      if (
+        normalizedName.endsWith("pump_r_is") ||
+        normalizedName === "pump_r_is" ||
+        normalizedName.endsWith("pump_current") ||
+        normalizedName.includes("pump_r_is")
+      ) {
+        const n = Number(sensor.value);
+        if (Number.isFinite(n)) return n;
+      }
     }
   }
 

@@ -27,6 +27,7 @@ import {
   type ErpSalesPoint,
 } from "@service-monitor/core";
 import { verifyServicePassword, hashServicePassword } from "@service-monitor/core/security/password";
+import { verifyCashDevPassword } from "@service-monitor/core/security/cash-dev-password";
 import { sshSessionManager } from "./ssh-session-manager";
 import {
   readDrinkxJson,
@@ -48,6 +49,7 @@ import {
   natsUpdateConfig,
 } from "./nats-service";
 import { syrupCheckSsh, syrupModbusScan } from "./syrup-service";
+import { probePosHost } from "./pos-host-probe";
 import { flashPartA, flashPartB } from "./flash-service";
 import {
   clearSessionPrefs,
@@ -553,6 +555,18 @@ function registerIpc(): void {
     return hashServicePassword(String(password ?? ""));
   });
 
+  ipcMain.handle("profiles:verifyCashDevPassword", (_e, password: string) => {
+    const ok = verifyCashDevPassword(String(password ?? ""));
+    if (!ok) {
+      logger.warn("security", "CashDev password rejected");
+      console.warn("[security] cashDev password rejected");
+    } else {
+      logger.info("security", "CashDev password accepted");
+      console.log("[security] cashDev password ok");
+    }
+    return { ok };
+  });
+
   // ---- Stage 3: общая SSH-сессия комплекса ---------------------------------
 
   ipcMain.handle("session:get", () => sshSessionManager.getSnapshot());
@@ -829,6 +843,23 @@ function registerIpc(): void {
   );
 
   ipcMain.handle("syrup:checkSsh", async () => syrupCheckSsh());
+
+  ipcMain.handle("pos:probeHost", async () => {
+    const res = await probePosHost({
+      identityFile: defaultIdentityPath(),
+    });
+    if (res.ok) {
+      logger.info("pos", "host probe ok", {
+        level: res.probe.level,
+        printer: res.probe.printerUnit,
+        payments: res.probe.paymentsUnit,
+        usb: res.probe.usb,
+      });
+    } else {
+      logger.warn("pos", "host probe failed", { error: res.error });
+    }
+    return res;
+  });
   ipcMain.handle(
     "syrup:modbusScan",
     async (

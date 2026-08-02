@@ -9,11 +9,11 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
-    "test": "node --test --experimental-strip-types src/stage0.desktop.test.ts",
+    "test": "node --test --experimental-strip-types src/stage0.desktop.test.ts src/pos.desktop.test.ts src/modules.desktop.test.ts",
     "preview": "electron-vite preview",
-    "dist": "npm run build && electron-builder --publish never",
-    "dist:win": "npm run build && electron-builder --win --publish never",
-    "dist:mac": "npm run build && electron-builder --mac --publish never",
+    "dist": "npm run build && node ../../scripts/electron-builder-dist.cjs",
+    "dist:win": "npm run build && node ../../scripts/electron-builder-win.cjs",
+    "dist:mac": "npm run build && node ../../scripts/electron-builder-mac.cjs",
     "dist:dir": "npm run build && electron-builder --dir --publish never"
   },
   "dependencies": {
@@ -37,7 +37,11 @@
   "build": {
     "appId": "tech.drinkx.service-monitor",
     "productName": "Service Monitor",
+    "executableName": "ServiceMonitor",
     "copyright": "Copyright © DrinkX / Fibbee",
+    "extraMetadata": {
+      "name": "service-monitor"
+    },
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -54,7 +58,8 @@
           "arch": ["x64"]
         }
       ],
-      "artifactName": "ServiceMonitor-Setup-${version}.${ext}"
+      "artifactName": "ServiceMonitor-Setup-${version}.${ext}",
+      "signAndEditExecutable": false
     },
     "nsis": {
       "oneClick": false,

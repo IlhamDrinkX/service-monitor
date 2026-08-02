@@ -15,6 +15,11 @@
 
 set -euo pipefail
 
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "Этот скрипт только для macOS. На Windows: scripts/install-windows.cmd" >&2
+  exit 1
+fi
+
 REPO_URL="${SERVICE_MONITOR_REPO:-https://github.com/IlhamDrinkX/service-monitor.git}"
 ROOT="${SERVICE_MONITOR_DIR:-${HOME}/service-monitor}"
 
@@ -141,6 +146,13 @@ install_and_build() {
     return
   fi
 
+  # No signing cert; avoid hung identity discovery. Clean stale release artifacts.
+  export CSC_IDENTITY_AUTO_DISCOVERY=false
+  local release_pre="${ROOT}/apps/desktop/release"
+  if [[ -d "${release_pre}" ]]; then
+    rm -rf "${release_pre:?}/"*
+  fi
+
   step "Сборка установщика (.dmg)"
   npm run dist:mac -w @service-monitor/desktop
 
@@ -155,6 +167,7 @@ install_and_build() {
       step "Открываю DMG: ${dmg}"
       open "${dmg}"
     else
+      echo "DMG не найден. На macOS Gatekeeper может блокировать сборку — смотри лог выше." >&2
       open "${release}"
     fi
   fi

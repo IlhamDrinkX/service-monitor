@@ -1,6 +1,9 @@
 /**
- * WriteGate: правки конфигов только после отдельного сервисного пароля.
- * Пароль ≠ ERP-логин — чтобы неподготовленные инженеры не лезли в drinkx.json.
+ * WriteGate: разблокировка на TTL после отдельного пароля.
+ * Используется для сервисного пароля правок конфигов (verifyServicePassword)
+ * и параллельно для CashDev (verifyCashDevPassword, gate id cashDev) —
+ * разные verifyPassword / session keys, не смешивать.
+ * Пароль ≠ ERP-логин.
  */
 
 import type { WriteSession } from "../domain/types.js";

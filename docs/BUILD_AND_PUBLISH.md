@@ -60,9 +60,19 @@ bash scripts/bootstrap.sh
 
 1. Проверяет **Git** / **Node.js ≥ 20** (ставит через winget / brew)
 2. `git pull` или `git clone`
-3. `npm install` → сборка → installer
+3. `npm install` (с retry) → сборка → installer
 
 Артефакты: `apps/desktop/release/`
+
+| Скрипт | Назначение |
+|--------|------------|
+| `build-local.cmd` / `.ps1` | **Локально из текущего клона** → Setup.exe (без git pull) |
+| `install-windows.cmd` / `.ps1` | Бета: clone в `%USERPROFILE%\service-monitor` + Setup.exe |
+| `install-macos.command` / `.sh` | Бета: clone в `~/service-monitor` + DMG |
+| `bootstrap.cmd` / `.ps1` | Инженер на Windows: update + dist:win |
+| `bootstrap.sh` | Инженер на macOS: update + dist:mac (Linux — без installer) |
+| `electron-builder-win.cjs` | NSIS: CSC off, clean release, retry spawn UNKNOWN |
+| `electron-builder-mac.cjs` | DMG: CSC off, clean release |
 
 Переменные:
 
@@ -71,6 +81,30 @@ bash scripts/bootstrap.sh
 | `SERVICE_MONITOR_REPO` | URL (по умолчанию `https://github.com/IlhamDrinkX/service-monitor.git`) |
 | `SERVICE_MONITOR_DIR` | Каталог (для install-*: `%USERPROFILE%\service-monitor` / `~/service-monitor`) |
 | `SERVICE_MONITOR_SKIP_DIST=1` | Только compile, без installer |
+
+### Windows: `spawn UNKNOWN` при NSIS
+
+electron-builder на шаге uninstaller запускает временный `ServiceMonitor-Setup-*.exe`. Если Windows Defender (или другой AV) блокирует свежий unsigned exe, получаете `Error: spawn UNKNOWN`.
+
+1. Windows Security → Virus & threat protection → Exclusions → добавить папку репо (или `apps\desktop\release`)
+2. Удалить `apps\desktop\release`
+3. `npm run dist:win -w @service-monitor/desktop` (скрипт сам чистит release и делает один retry)
+
+### Быстрая локальная сборка (текущий клон)
+
+```bat
+scripts\build-local.cmd
+```
+
+или:
+
+```powershell
+npm run build:local
+```
+
+Соберёт core + desktop + `ServiceMonitor-Setup-*.exe` в `apps/desktop/release/` и откроет установщик.
+`SERVICE_MONITOR_OPEN=0` — только собрать, не запускать Setup.
+`SERVICE_MONITOR_SKIP_DIST=1` — только compile, без installer.
 
 ## Публикация в GitHub
 

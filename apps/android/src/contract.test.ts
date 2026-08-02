@@ -21,6 +21,9 @@ describe("android stub / core browser", () => {
 
   it("lists native bridge methods", () => {
     assert.ok(BRIDGE_METHOD_NAMES.includes("natsConnect"));
+    assert.ok(BRIDGE_METHOD_NAMES.includes("syrupCheckSsh"));
+    assert.ok(BRIDGE_METHOD_NAMES.includes("syrupModbusScan"));
     assert.ok(BRIDGE_METHOD_NAMES.includes("flashPartA"));
+    assert.ok(BRIDGE_METHOD_NAMES.includes("flashPartB"));
   });
 });

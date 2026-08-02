@@ -23,6 +23,12 @@
       "import": "./dist/security/password.js",
       "require": "./dist/security/password.js",
       "default": "./dist/security/password.js"
+    },
+    "./security/cash-dev-password": {
+      "types": "./dist/security/cash-dev-password.d.ts",
+      "import": "./dist/security/cash-dev-password.js",
+      "require": "./dist/security/cash-dev-password.js",
+      "default": "./dist/security/cash-dev-password.js"
     }
   },
   "scripts": {

@@ -1,5 +1,6 @@
 /**
  * Панель сиропа (Modbus) + flash partA/partB на Host dozator.
+ * Stage 6: scan/motor params, live log, in-app flash, legacy launch свёрнут.
  */
 
 import { useEffect, useState } from "react";
@@ -29,6 +30,8 @@ export function SyrupFlashPanel({ busy, setBusy, onToast }: Props) {
   const [currentBaud, setCurrentBaud] = useState(9600);
   const [newBaud, setNewBaud] = useState(19200);
   const [flashLog, setFlashLog] = useState("");
+  /** Legacy Electron-окна flash_sirup / sirup_test — свёрнуты по умолчанию */
+  const [legacyOpen, setLegacyOpen] = useState(false);
 
   useEffect(() => {
     return window.desktop.onFlashLog((entry) => {
@@ -140,10 +143,10 @@ export function SyrupFlashPanel({ busy, setBusy, onToast }: Props) {
   return (
     <>
       <div className="panel">
-        <h2>Сироп · Modbus / dozator</h2>
+        <h2>Сироп · Modbus / стенд dozator</h2>
         <p className="lead">
           SSH Host <code>dozator</code> → <code>modbus-cli.js</code> на{" "}
-          <code>/dev/ttySC0</code>.
+          <code>/dev/ttySC0</code> (не NATS на комплексе).
         </p>
         <div className="row" style={{ marginBottom: 10 }}>
           <label className="muted">
@@ -307,6 +310,51 @@ export function SyrupFlashPanel({ busy, setBusy, onToast }: Props) {
             {flashLog}
           </pre>
         ) : null}
+      </div>
+
+      <div className="panel panel-compact">
+        <button
+          type="button"
+          className="btn stand-disclosure-btn"
+          aria-expanded={legacyOpen}
+          onClick={() => setLegacyOpen((v) => !v)}
+        >
+          <span className="stand-disclosure-chevron" aria-hidden>
+            {legacyOpen ? "▾" : "▸"}
+          </span>
+          Legacy окна (flash_sirup / sirup_test)
+        </button>
+        {!legacyOpen ? (
+          <p className="muted stand-disclosure-hint">
+            Предпочтительны in-app Part A/B выше. Отдельные Electron-окна — только
+            если нужен старый UI из fleet-foundry.
+          </p>
+        ) : (
+          <div className="row" style={{ marginTop: 10, flexWrap: "wrap", gap: 8 }}>
+            <ActionButton
+              className="btn-compact"
+              disabled={disabled}
+              onClick={() =>
+                void window.desktop
+                  .launchFleetTool({ tool: "flash_sirup" })
+                  .catch((e) => onToast({ text: errText(e), error: true }))
+              }
+            >
+              flash_sirup (окно)
+            </ActionButton>
+            <ActionButton
+              className="btn-compact"
+              disabled={disabled}
+              onClick={() =>
+                void window.desktop
+                  .launchFleetTool({ tool: "sirup_test" })
+                  .catch((e) => onToast({ text: errText(e), error: true }))
+              }
+            >
+              sirup_test (окно)
+            </ActionButton>
+          </div>
+        )}
       </div>
     </>
   );

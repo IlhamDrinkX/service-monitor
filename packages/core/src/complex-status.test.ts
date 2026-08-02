@@ -8,6 +8,8 @@ import {
   complexTupleSummary,
   extractOpenValveNumbers,
   mergeOpenValveNumbers,
+  applyLabStatusReplies,
+  emptyLabSnapshot,
 } from "./index.js";
 
 describe("complex-status", () => {
@@ -37,9 +39,10 @@ describe("complex-status", () => {
     assert.match(complexTupleSummary(tuple), /milk:/);
   });
 
-  it("facade milkSensors + milkValves [] → temps filled, fridge all OFF (not unknown)", () => {
+  it("facade {hwid:dx} milkSensors + milkValves [] → temps filled, fridge all OFF", () => {
     const facade = {
       format: "drinkx-1.0",
+      hwid: "dx",
       milkSensors: [
         { name: "milk_input", type: "temp", value: 6.2 },
         { name: "milk_heater1_out", type: "temp", value: 55 },
@@ -54,9 +57,14 @@ describe("complex-status", () => {
     assert.equal(tuple.hosts.milk.temps.input, 6.2);
     assert.equal(tuple.hosts.coffee.temps.input, 24);
     assert.equal(tuple.hosts.water.temps.input, 18);
+    assert.equal(tuple.hosts.milk.source, "facade");
     // Explicit [] = all closed (not null/yellow unknown)
     assert.deepEqual(extractOpenValveNumbers(facade), []);
     assert.deepEqual(mergeOpenValveNumbers([]), []);
+
+    const snap = applyLabStatusReplies(emptyLabSnapshot(), [facade], 100);
+    assert.deepEqual(snap.milkSystemOpen?.value, []);
+    assert.notEqual(snap.milkSystemOpen, null);
   });
 
   it("merges module replies by hwid", () => {

@@ -30,6 +30,9 @@ export type ServiceMonitorNativeBridge = {
   drinkxRead(input: {
     role: DrinkxHost;
   }): Promise<{ ok: true; text: string } | { ok: false; error: string }>;
+  syrupCheckSsh(): Promise<
+    { ok: true; message: string } | { ok: false; error: string }
+  >;
   syrupModbusScan(input: {
     mode: "scan" | "motor";
     maxId?: number;
@@ -37,11 +40,16 @@ export type ServiceMonitorNativeBridge = {
     id?: number;
     seconds?: number;
     intensity?: number;
+    singleMode?: boolean;
   }): Promise<{ ok: true; output: string } | { ok: false; error: string }>;
   flashPartA(config: {
     currentId: number;
     newId: number;
     currentBaud: number;
+    newBaud: number;
+  }): Promise<{ ok: true } | { ok: false; error: string }>;
+  flashPartB(config: {
+    newId: number;
     newBaud: number;
   }): Promise<{ ok: true } | { ok: false; error: string }>;
 };
@@ -54,6 +62,8 @@ export const BRIDGE_METHOD_NAMES = [
   "natsMuster",
   "natsRequest",
   "drinkxRead",
+  "syrupCheckSsh",
   "syrupModbusScan",
   "flashPartA",
+  "flashPartB",
 ] as const satisfies ReadonlyArray<keyof ServiceMonitorNativeBridge>;

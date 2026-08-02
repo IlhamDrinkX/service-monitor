@@ -26,12 +26,30 @@
 |------------|----------|
 | Температуры / pressure / pulses | NATS `coffeemachine.status` **`{ hwid: "dx" }`** (fallback many `{}`) |
 | Холодильник msValve 1…6 | status `milkValves`/`coffeeValves` (idle `[]` = все OFF) + bus `complexos.valves.switched` |
+| Сиропы / дозатор (поле) | NATS `complexos.sirup.muster` / `status|pump|unpump|stop.<id>` — status = `forward\|reverse\|stopped` только (ток/В нет); см. ниже |
+| Сироп flash / Modbus scan | SSH Host `dozator` (стенд) — вкладка **Дозатор**; там же ток/регистры плат при наличии CLI |
 | Мощность насоса % | NATS `pumps.status.{milk,coffee,water}` (+ optimistic cmd) |
 | R_IS / L_IS | HTTP DX UI `:8000` (туннель 8082–8084) — вольты АЦП; milk=.44 (**не** `.33`) |
 | ШИМ тэнов | оценка `(target−temp)×1.5` clamp 25–75; **не** DX graph; **не** status `*_heater*_power` (дубль temp) |
 | Health per host | snapshot `hostHealth`: NATS (pump/status) vs DX HTTP |
 
-Опрос: `LabTelemetryController` — NATS ~1.1s, DX ~1.5s отдельно. Pause на команду не стопит DX.
+Опрос: `LabTelemetryController` — NATS ~800ms (active + other tracked), DX ~1s отдельно. Pause на команду не стопит DX.
+
+### Сиропы: muster 30 vs «нет ответа»
+
+На 4.x `muster` часто отвечает **30 раз** (hwid `"1"`…`"30"`, `MAX_MOTORS`) — это список слотов драйвера, **не** «все моторы живы».
+
+На практике три случая, которые инженер видит в дашборде / на железе:
+
+| Случай | Status NATS | Как выглядит в SM |
+|--------|-------------|-------------------|
+| Включён (есть на шине) | `forward` / `reverse` / `stopped` | чип стоп/стрелка, строка в логе |
+| Заблокирован в дашборде | часто отвечает при спокойном опросе | чип стоп/стрелка (как включённый) |
+| Физически нет | **timeout** | чип `?` · «нет ответа» |
+
+Параллельный bulk status перегружает `ft-sirup-drv` / шину и даёт **ложные** timeout даже на живых моторах. Физически отсутствующие всё равно timeout; NATS сам по себе «заблокирован vs нет» не маркирует — смотрите дашборд и спокойный опрос.
+
+«Опрос всех»: **последовательно** (concurrency 1, ~3 с timeout + короткая пауза между моторами); ответившие — по строке; таймауты схлопываются (`нет ответа: …`) + сводка. Одиночный Status остаётся ~1.2 с.
 
 ## Modules Lab — сценарии и Brew
 

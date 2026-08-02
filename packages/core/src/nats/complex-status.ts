@@ -121,7 +121,9 @@ function snapshotFromStatus(
   const waterPulses =
     host === "water" ? extractWaterTotalPulses(raw, "water") : null;
   const pumpCurrent =
-    host === "milk" || host === "coffee" ? extractPumpCurrent(raw) : null;
+    host === "milk" || host === "coffee"
+      ? extractPumpCurrent(raw, host)
+      : null;
   return {
     host,
     temps,

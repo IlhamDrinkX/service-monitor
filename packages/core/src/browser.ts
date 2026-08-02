@@ -94,9 +94,23 @@ export type {
 } from "./nats/module-devices.js";
 export {
   createLabEvent,
+  LAB_EVENTS_MAX,
+  LAB_EVENTS_CHART_SYNC_MAX,
+  LAB_EVENTS_CHART_WINDOW_MAX,
+  LAB_EVENTS_SYNC_ACTUATOR_RESERVE,
+  trimLabEvents,
+  trimLabEventsForChartSync,
+  mergeLabChartSyncEvents,
   formatLabTerminalLine,
   labEventsToCsv,
   sensorSeries,
+  extendSeriesEnd,
+  SENSOR_SERIES_HOLD_MS,
+  isDxSensorLocalName,
+  isFiniteSeriesValue,
+  seriesYDomain,
+  seriesPathD,
+  seriesHasDrawablePoints,
   chartSinceMs,
   booleanStepSeries,
   pumpPowerSeries,
@@ -112,6 +126,7 @@ export type {
   ChartTimeScale,
   ChartSeriesMeta,
   LabSnapshotRow,
+  SeriesPoint,
 } from "./nats/lab-log.js";
 export {
   VALVE_PACKAGES,
@@ -148,6 +163,58 @@ export type {
   CleaningTimingKey,
   ComplexOsRisk,
 } from "./nats/complexos-subjects.js";
+export {
+  SIRUP_SUBJECTS,
+  parseSirupHwid,
+  parseSirupMusterReplies,
+  parseSirupStatusReply,
+  parseSirupPumpReply,
+  sirupPumpPayload,
+  sirupStatusLabel,
+  isSirupStatusTimeout,
+  classifySirupStatusFailure,
+  formatSirupIdRanges,
+  summarizeSirupPollResults,
+} from "./nats/sirup.js";
+export type {
+  SirupMotorStatus,
+  SirupStatusReply,
+  SirupPumpReply,
+  SirupMotorAction,
+  SirupPollOutcomeKind,
+  SirupPollItem,
+  SirupPollSummary,
+} from "./nats/sirup.js";
+export {
+  PRINTER_SUBJECTS,
+  PAYMENTS_SUBJECTS,
+  POS_DEFAULT_HWID_HINT,
+  POS_BARCODE_TEST,
+  POS_STATUS_AUTO_COMMIT_WARNING,
+  parsePosHwid,
+  parsePosMusterReplies,
+  parsePrinterStatusReply,
+  parsePaymentsStatusReply,
+  parsePaymentsCheckReply,
+  parsePosActionReply,
+  parsePosHostProbeOutput,
+  formatPosHostProbeLog,
+  posBarcodeTestPayload,
+  posWorkdayLabel,
+  formatPosStatusLine,
+  POS_HOST_PROBE_CMD,
+} from "./nats/pos.js";
+export type {
+  PosWorkday,
+  PrinterStatusReply,
+  PaymentsStatusReply,
+  PaymentsCheckReply,
+  PosActionReply,
+  PosHostProbe,
+  PosHostProbeLevel,
+  PosHostUsbFlags,
+  PosUnitActiveState,
+} from "./nats/pos.js";
 export {
   TERMINAL_SUBJECT_PRESETS,
   TERMINAL_PAYLOAD_PRESETS,
@@ -189,7 +256,13 @@ export {
   emptyLabSnapshot,
   setTimed,
   STALE_MS,
+  LAB_ACTIVE_POLL_MS,
+  LAB_OTHER_STATUS_MS,
+  planLabNatsPoll,
   isTelemetryStale,
+  applyLabStatusReplies,
+  computeNatsHostHealth,
+  applyDxPumpCurrents,
 } from "./nats/lab-telemetry.js";
 export type {
   TimedValue,
@@ -198,4 +271,6 @@ export type {
   LabHostHealth,
   LabHostHeaters,
   LabHostPwm,
+  HostOkMap,
+  DxPumpCurrentsPayload,
 } from "./nats/lab-telemetry.js";

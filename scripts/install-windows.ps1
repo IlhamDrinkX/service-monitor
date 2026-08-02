@@ -165,8 +165,11 @@ function Install-And-Build {
   }
 
   Write-Step "Building Windows installer (.exe)"
+  # scripts/electron-builder-win.cjs: CSC_*, __COMPAT_LAYER, clean release, retry on spawn UNKNOWN
+  $env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
+  $env:__COMPAT_LAYER = "RunAsInvoker"
   npm run dist:win -w @service-monitor/desktop
-  if ($LASTEXITCODE -ne 0) { throw "dist:win failed" }
+  if ($LASTEXITCODE -ne 0) { throw "dist:win failed (if spawn UNKNOWN: exclude repo from Defender, delete apps\desktop\release, re-run)" }
 
   $release = Join-Path $Root "apps\desktop\release"
   Write-Host ""
@@ -183,6 +186,9 @@ function Install-And-Build {
       Where-Object { $_.Name -notmatch "uninstall|blockmap" } |
       Sort-Object LastWriteTime -Descending |
       Select-Object -First 1
+  }
+  if ($setup -and $setup.Length -lt 512KB) {
+    throw "Installer looks incomplete ($([math]::Round($setup.Length/1KB))KB stub). Exclude $Root from Defender and re-run."
   }
   if ($setup) {
     Write-Step "Launching installer: $($setup.Name)"
@@ -205,6 +211,12 @@ try {
 } catch {
   Write-Host ""
   Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
-  Write-Host "Just re-run this script (network glitches are common on Electron download)." -ForegroundColor Yellow
+  if ($_.Exception.Message -match "spawn UNKNOWN|dist:win|incomplete|Defender") {
+    Write-Host "NSIS step often fails when Windows Defender locks the temporary Setup.exe." -ForegroundColor Yellow
+    Write-Host "Fix: Windows Security -> Virus & threat -> Exclusions -> add this folder, then re-run." -ForegroundColor Yellow
+    Write-Host "  $Root" -ForegroundColor Yellow
+  } else {
+    Write-Host "Just re-run this script (network glitches are common on Electron download)." -ForegroundColor Yellow
+  }
   exit 1
 }

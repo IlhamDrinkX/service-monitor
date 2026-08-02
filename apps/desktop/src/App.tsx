@@ -13,6 +13,7 @@ import { FleetPage } from "./pages/FleetPage";
 import { HelpPage } from "./pages/HelpPage";
 import { ModulesPage } from "./pages/ModulesPage";
 import { PeripheralsPage } from "./pages/PeripheralsPage";
+import { PosPage } from "./pages/PosPage";
 import { SessionPage } from "./pages/SessionPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { LabChartWindowPage } from "./components/ModulesLabCharts";
@@ -38,6 +39,7 @@ type TabId =
   | "session"
   | "modules"
   | "peripherals"
+  | "pos"
   | "complexos"
   | "config"
   | "help"
@@ -88,6 +90,13 @@ const TABS: Array<{
     icon: "⚙",
     helpId: "nav.config",
     title: "Конфиги drinkx / ComplexOS",
+  },
+  {
+    id: "pos",
+    label: "Касса / ККТ",
+    icon: "▤",
+    helpId: "nav.pos",
+    title: "Касса · ККТ / платежи",
   },
   { id: "help", label: "Справка", icon: "?", helpId: "nav.help", title: "Справка" },
   {
@@ -232,6 +241,7 @@ function AppShell() {
               {tab === "access" ? <AccessPage /> : null}
               {tab === "session" ? <SessionPage /> : null}
               {tab === "peripherals" ? <PeripheralsPage /> : null}
+              {tab === "pos" ? <PosPage /> : null}
               {tab === "complexos" ? <ComplexOsPage /> : null}
               {tab === "config" ? <ConfigPage /> : null}
               {tab === "help" ? <HelpPage /> : null}
@@ -246,7 +256,11 @@ function AppShell() {
 
 export function App() {
   if (isLabChartView()) {
-    return <LabChartWindowPage />;
+    return (
+      <ErrorBoundary label="lab-chart">
+        <LabChartWindowPage />
+      </ErrorBoundary>
+    );
   }
   return (
     <SessionProvider>

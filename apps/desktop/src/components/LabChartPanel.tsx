@@ -21,10 +21,14 @@ import {
   booleanStepSeries,
   chartSeriesMeta,
   chartSinceMs,
+  isFiniteSeriesValue,
   parseSeriesKey,
   pumpPowerSeries,
   sensorSeries,
+  seriesHasDrawablePoints,
   seriesKey,
+  seriesPathD,
+  seriesYDomain,
   snapshotAt,
   type ChartTimeScale,
   type DrinkxHost,
@@ -131,24 +135,14 @@ function moveKey(order: string[], key: string, dir: -1 | 1): string[] {
 
 /**
  * Достраиваем ступеньки до now по истории событий.
- * Live-снимок не вставляем поверх истории — иначе справа появляется
- * «залипший» короткий ON, не совпадающий с цветом ряда под курсором.
+ * Без истории — пусто: live-снимок НЕ растягиваем на весь view
+ * (раньше viewStart→now заливало насос ON на всю шкалу).
  */
 function finalizeActuatorPoints(
   points: Array<{ t: number; v: number }>,
-  live: boolean | undefined,
-  viewStart: number | null,
   now: number
 ): Array<{ t: number; v: number }> {
-  if (points.length === 0) {
-    if (live == null) return [];
-    const v = live ? 1 : 0;
-    const t0 = viewStart != null ? viewStart : Math.max(0, now - 1_000);
-    return [
-      { t: t0, v },
-      { t: now, v },
-    ];
-  }
+  if (points.length === 0) return [];
   const out = points.map((p) => ({ ...p }));
   const last = out[out.length - 1]!;
   if (last.t < now) {
@@ -191,7 +185,7 @@ type ContinuousSeries = {
   code: string;
   unit: string;
   color: string;
-  points: Array<{ t: number; v: number }>;
+  points: Array<{ t: number; v: number | null }>;
 };
 
 type ActuatorSeries = {
@@ -207,7 +201,7 @@ export function LabChartPanel({
   initialSensor,
   valvesMap,
   heaterIds,
-  liveActuators,
+  liveActuators: _liveActuators,
   windowMode = false,
 }: LabChartSyncPayload & { windowMode?: boolean }) {
   const [replay, setReplay] = useState<LabChartSyncPayload | null>(null);
@@ -229,12 +223,19 @@ export function LabChartPanel({
     () => ({ milk: [], coffee: [], water: [] })
   );
   const importRef = useRef<HTMLInputElement>(null);
+  /** Live wall-clock for window mode so the axis advances even between IPC syncs. */
+  const [wallNow, setWallNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!windowMode || replay) return;
+    const id = setInterval(() => setWallNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [windowMode, replay]);
 
   const effectiveEvents = replay?.events ?? events;
   const effectiveSensors = replay?.allSensors ?? allSensors;
   const effectiveValvesMap = replay?.valvesMap ?? valvesMap;
   const effectiveHeaterIds = replay?.heaterIds ?? heaterIds;
-  const effectiveLiveActuators = replay ? undefined : liveActuators;
   const replayNow = useMemo(() => {
     if (!replay) return null;
     const times = replay.events
@@ -242,7 +243,7 @@ export function LabChartPanel({
       .filter(Number.isFinite);
     return times.length > 0 ? Math.max(...times) : null;
   }, [replay]);
-  const clockNow = replayNow ?? Date.now();
+  const clockNow = replayNow ?? (windowMode ? wallNow : Date.now());
 
   const dataSpan = useMemo(() => {
     let minT = Number.POSITIVE_INFINITY;
@@ -310,6 +311,15 @@ export function LabChartPanel({
         void window.desktop.labChartToggleFullScreen?.();
         return;
       }
+      if (e.key === "Escape") {
+        const tag = (e.target as HTMLElement | null)?.tagName;
+        if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+        if (markerT != null) {
+          e.preventDefault();
+          setMarkerT(null);
+        }
+        return;
+      }
       if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
@@ -327,7 +337,7 @@ export function LabChartPanel({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [clockNow, timeScale, windowMode]);
+  }, [clockNow, markerT, timeScale, windowMode]);
 
   const continuous = useMemo(() => {
     const series: ContinuousSeries[] = [];
@@ -343,7 +353,11 @@ export function LabChartPanel({
         since,
         viewEnd
       );
-      if (local === "pumpPower" && points.length < 2 && module) {
+      if (
+        local === "pumpPower" &&
+        points.filter((p) => isFiniteSeriesValue(p.v)).length < 2 &&
+        module
+      ) {
         const fromPump = pumpPowerSeries(
           effectiveEvents,
           since,
@@ -351,7 +365,12 @@ export function LabChartPanel({
           module,
           viewEnd
         );
-        if (fromPump.length > points.length) points = fromPump;
+        if (
+          fromPump.filter((p) => isFiniteSeriesValue(p.v)).length >
+          points.filter((p) => isFiniteSeriesValue(p.v)).length
+        ) {
+          points = fromPump;
+        }
       }
       series.push({
         id,
@@ -405,12 +424,7 @@ export function LabChartPanel({
           id: `valve:${key}`,
           label: `${mod} · ${VALVE_LABELS[id] ?? id}`,
           color: ACTUATOR_COLORS[ai++ % ACTUATOR_COLORS.length]!,
-          points: finalizeActuatorPoints(
-            raw,
-            effectiveLiveActuators?.valves[key],
-            viewStart,
-            viewEnd
-          ),
+          points: finalizeActuatorPoints(raw, viewEnd),
         });
       }
       if (showPumpOn.has(mod)) {
@@ -427,26 +441,19 @@ export function LabChartPanel({
           id: `pump:${key}`,
           label: `${mod} · Насос ON/OFF`,
           color: ACTUATOR_COLORS[ai++ % ACTUATOR_COLORS.length]!,
-          points: finalizeActuatorPoints(
-            raw,
-            effectiveLiveActuators?.pumps[mod],
-            viewStart,
-            viewEnd
-          ),
+          points: finalizeActuatorPoints(raw, viewEnd),
         });
       }
     }
     return list;
   }, [
     effectiveEvents,
-    effectiveLiveActuators,
     effectiveValvesMap,
     limit,
     showPumpOn,
     since,
     valvesOn,
     viewEnd,
-    viewStart,
   ]);
 
   const slice = useMemo(
@@ -1026,21 +1033,27 @@ export function LabChartPanel({
 }
 
 function sampleAt(
-  points: Array<{ t: number; v: number }>,
+  points: Array<{ t: number; v: number | null }>,
   t: number,
   mode: "linear" | "step"
 ): number | null {
   if (points.length === 0) return null;
-  if (t <= points[0]!.t) return points[0]!.v;
+  const first = points[0]!;
+  if (t <= first.t) return first.v;
   for (let i = 1; i < points.length; i++) {
     const a = points[i - 1]!;
     const b = points[i]!;
     if (t > b.t) continue;
     if (mode === "step") return a.v;
+    if (a.v == null || b.v == null) return null;
     const span = b.t - a.t || 1;
     return a.v + ((b.v - a.v) * (t - a.t)) / span;
   }
-  return points[points.length - 1]!.v;
+  const last = points[points.length - 1]!;
+  // Continuous: не экстраполируем last-known за конец ряда (gap при NATS loss).
+  // Step (actuators): держат ступеньку до now через finalizeActuatorPoints.
+  if (t > last.t) return mode === "step" ? last.v : null;
+  return last.v;
 }
 
 type HoverTip = {
@@ -1213,7 +1226,6 @@ function MultiChart({
   const h = svgH;
   const plotW = Math.max(80, w - padL - padR);
 
-  const allPts = continuous.flatMap((series) => series.points);
   let tMin = viewStart;
   let tMax = viewEnd;
   if (tMax <= tMin) tMax = tMin + 1_000;
@@ -1224,16 +1236,12 @@ function MultiChart({
   if (yScale === "0-5") yMax = 5;
   else if (yScale === "0-100" || normalize) yMax = 100;
   else if (yScale === "0-120") yMax = 120;
-  else if (!stacked && allPts.length > 0) {
-    yMin = Math.min(...allPts.map((point) => point.v));
-    yMax = Math.max(...allPts.map((point) => point.v));
-    if (yMax === yMin) {
-      yMin -= 1;
-      yMax += 1;
-    }
-    const pad = (yMax - yMin) * 0.08;
-    yMin -= pad;
-    yMax += pad;
+  else if (!stacked) {
+    const domain = seriesYDomain(
+      continuous.flatMap((series) => series.points)
+    );
+    yMin = domain.min;
+    yMax = domain.max;
   }
 
   const xOf = (t: number) => padL + ((t - tMin) / (tMax - tMin)) * plotW;
@@ -1241,46 +1249,30 @@ function MultiChart({
     padT + plotH - ((v - yMin) / (yMax - yMin || 1)) * plotH;
   const tOf = (x: number) => tMin + ((x - padL) / plotW) * (tMax - tMin);
 
-  function autoRange(points: Array<{ t: number; v: number }>) {
-    let min = points.length > 0 ? Math.min(...points.map((point) => point.v)) : 0;
-    let max = points.length > 0 ? Math.max(...points.map((point) => point.v)) : 1;
-    if (max === min) {
-      min -= 1;
-      max += 1;
-    }
-    const pad = (max - min) * 0.08;
-    return { min: min - pad, max: max + pad };
-  }
-
   function seriesYMap(series: ContinuousSeries, index: number) {
     if (stacked) {
       const top = padT + index * bandH + 5;
       const bottom = padT + (index + 1) * bandH - 5;
-      const range = autoRange(series.points);
+      const range = seriesYDomain(series.points);
       return (v: number) =>
         bottom -
         ((v - range.min) / (range.max - range.min || 1)) * (bottom - top);
     }
     if (!normalize) return yOf;
-    const range = autoRange(series.points);
+    const range = seriesYDomain(series.points);
     return (v: number) =>
       padT + plotH - ((v - range.min) / (range.max - range.min || 1)) * plotH;
   }
 
   function pathFor(
-    points: Array<{ t: number; v: number }>,
+    points: Array<{ t: number; v: number | null }>,
     yMap: (v: number) => number
   ) {
-    return points
-      .map((point, index) => {
-        const command = index === 0 ? "M" : "L";
-        return `${command}${xOf(point.t).toFixed(1)},${yMap(point.v).toFixed(1)}`;
-      })
-      .join(" ");
+    return seriesPathD(points, xOf, yMap);
   }
 
   const hasData =
-    continuous.some((series) => series.points.length > 0) ||
+    continuous.some((series) => seriesHasDrawablePoints(series.points)) ||
     actuators.some((series) => series.points.length > 0);
   const strokeW =
     nCont > 10 ? 1.4 : nCont > 5 ? 1.8 : 2.2;
@@ -1327,7 +1319,7 @@ function MultiChart({
       const contLimit = Math.max(14, bandHStack * 0.4);
       continuous.forEach((series, index) => {
         const v = sampleAt(series.points, t, "linear");
-        if (v == null) return;
+        if (!isFiniteSeriesValue(v)) return;
         const yMap = seriesYMap(series, index);
         const y = yMap(v);
         const dist = Math.abs(y - sy);

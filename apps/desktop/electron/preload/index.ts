@@ -59,6 +59,9 @@ export type DesktopApi = {
   verifyServicePassword: (
     password: string
   ) => Promise<{ ok: boolean }>;
+  verifyCashDevPassword: (
+    password: string
+  ) => Promise<{ ok: boolean }>;
   erpGetSession: () => Promise<
     { ok: true; email: string } | { ok: false }
   >;
@@ -193,6 +196,20 @@ export type DesktopApi = {
   syrupCheckSsh: () => Promise<
     { ok: true; message: string } | { ok: false; error: string }
   >;
+  /** SSH systemctl/lsusb на complexos (ft-*-drv + USB 2912/0e8d/3513). */
+  posProbeHost: () => Promise<
+    | {
+        ok: true;
+        probe: {
+          printerUnit: string;
+          paymentsUnit: string;
+          usb: { atol: boolean; kozen: boolean; niimbot: boolean };
+          level: "ok" | "warn" | "error";
+          lines: string[];
+        };
+      }
+    | { ok: false; error: string }
+  >;
   syrupModbusScan: (input: {
     mode: "scan" | "motor";
     maxId?: number;
@@ -305,6 +322,8 @@ const api: DesktopApi = {
     ipcRenderer.invoke("profiles:hashServicePassword", password),
   verifyServicePassword: (password) =>
     ipcRenderer.invoke("profiles:verifyServicePassword", password),
+  verifyCashDevPassword: (password) =>
+    ipcRenderer.invoke("profiles:verifyCashDevPassword", password),
   erpGetSession: () => ipcRenderer.invoke("erp:getSession"),
   erpLogin: (input) => ipcRenderer.invoke("erp:login", input),
   erpLogout: () => ipcRenderer.invoke("erp:logout"),
@@ -370,6 +389,7 @@ const api: DesktopApi = {
     return () => ipcRenderer.removeListener("nats:bus", handler);
   },
   syrupCheckSsh: () => ipcRenderer.invoke("syrup:checkSsh"),
+  posProbeHost: () => ipcRenderer.invoke("pos:probeHost"),
   syrupModbusScan: (input) => ipcRenderer.invoke("syrup:modbusScan", input),
   flashPartA: (config) => ipcRenderer.invoke("flash:partA", config),
   flashPartB: (config) => ipcRenderer.invoke("flash:partB", config),

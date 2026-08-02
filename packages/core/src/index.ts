@@ -31,3 +31,5 @@ export * from "./nats/terminal-presets.js";
 export * from "./nats/lab-scenarios.js";
 export * from "./nats/dx-ui-stat.js";
 export * from "./nats/lab-telemetry.js";
+export * from "./nats/lab-logger.js";
+export * from "./health/health-report.js";

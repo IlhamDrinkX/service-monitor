@@ -1,6 +1,6 @@
 {
   "name": "@service-monitor/core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -34,7 +34,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test dist/**/*.test.js",
+    "test": "npm run build && node --test 'dist/**/*.test.js'",
     "test:stage0": "npm run build && node --test dist/stage0.test.js",
     "test:stage1": "npm run build && node --test dist/stage1.test.js",
     "test:stage2": "npm run build && node --test dist/stage2.test.js",

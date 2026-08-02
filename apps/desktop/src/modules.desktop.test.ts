@@ -3,7 +3,10 @@
  * Запуск: npm test -w @service-monitor/desktop
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { describe, it, beforeEach, afterEach } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   defaultHwid,
   seriesKey,
@@ -754,5 +757,26 @@ describe("desktop / modulesLabTelemetryHelpers", () => {
       "5": false,
       "6": false,
     });
+  });
+});
+
+describe("desktop / ModulesLabCharts TDZ guard", () => {
+  it("declares allSensors/valvesMap before syncLatest ref", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(
+      join(here, "components", "ModulesLabCharts.tsx"),
+      "utf8"
+    );
+    const fn = src.slice(src.indexOf("export function ModulesLabCharts"));
+    const valvesIdx = fn.indexOf("const valvesMap = useMemo");
+    const sensorsIdx = fn.indexOf("const allSensors = useMemo");
+    const syncIdx = fn.indexOf("const syncLatest = useRef");
+    assert.ok(valvesIdx > 0, "valvesMap useMemo missing");
+    assert.ok(sensorsIdx > 0, "allSensors useMemo missing");
+    assert.ok(syncIdx > 0, "syncLatest useRef missing");
+    assert.ok(
+      valvesIdx < syncIdx && sensorsIdx < syncIdx,
+      "syncLatest must not read allSensors/valvesMap before initialization (TDZ crash)"
+    );
   });
 });

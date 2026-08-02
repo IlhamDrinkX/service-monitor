@@ -25,6 +25,7 @@ import {
   trimLabEvents,
   trimLabEventsForChartSync,
   mergeLabChartSyncEvents,
+  maxLabEventAtMs,
   seriesHasDrawablePoints,
   seriesYDomain,
   seriesPathD,
@@ -498,6 +499,24 @@ describe("lab-log", () => {
     const cleared = mergeLabChartSyncEvents(big, [mk(9_999)], 10);
     assert.equal(cleared.length, 1);
     assert.equal(cleared[0]!.value, 9_999);
+  });
+
+  it("maxLabEventAtMs is stack-safe for chart window ring sizes", () => {
+    const t0 = Date.parse("2026-07-31T12:00:00.000Z");
+    const n = 150_000; // Math.max(...arr) throws RangeError around here
+    const events = Array.from({ length: n }, (_, i) =>
+      createLabEvent({
+        kind: "sensor",
+        module: "milk",
+        hwid: "dx.milk",
+        name: "input",
+        value: i,
+        at: new Date(t0 + i * 1000).toISOString(),
+      })
+    );
+    assert.equal(maxLabEventAtMs(events), t0 + (n - 1) * 1000);
+    assert.equal(maxLabEventAtMs([]), null);
+    assert.ok(n > 130_000, "documents Math.max spread crash threshold");
   });
 
   it("series path/domain stay drawable across null gaps (no blank chart)", () => {

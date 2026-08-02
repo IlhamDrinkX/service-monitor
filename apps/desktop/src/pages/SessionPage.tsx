@@ -7,9 +7,15 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { ActionButton } from "../components/ActionButton";
 import { HelpTip } from "../components/HelpTip";
 import {
+  buildHealthReport,
+  formatHealthReportText,
+  healthLevelLabel,
   serviceUrlsForMode,
+  type HealthLevel,
+  type HealthReport,
   type SessionMode,
 } from "@service-monitor/core";
+import { gatherHealthReportInput } from "../lab/healthReportProbes";
 import { useComplexSession } from "../state/useComplexSession";
 
 export function SessionPage() {
@@ -20,6 +26,11 @@ export function SessionPage() {
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<{ text: string; error?: boolean } | null>(
     null
+  );
+  const [healthReport, setHealthReport] = useState<HealthReport | null>(null);
+  const [healthBusy, setHealthBusy] = useState(false);
+  const [healthOpenSections, setHealthOpenSections] = useState<Set<string>>(
+    new Set()
   );
 
   useEffect(() => {
@@ -67,6 +78,44 @@ export function SessionPage() {
       text: snap.message,
       error: /ARP ошибка|discovery fail/i.test(snap.message),
     });
+  }
+
+  async function onRunHealthReport() {
+    if (healthBusy) return;
+    setHealthBusy(true);
+    try {
+      const input = await gatherHealthReportInput(session);
+      const report = buildHealthReport(input);
+      setHealthReport(report);
+      setHealthOpenSections(
+        new Set(report.sections.filter((s) => s.level !== "ok").map((s) => s.id))
+      );
+    } finally {
+      setHealthBusy(false);
+    }
+  }
+
+  function toggleHealthSection(id: string) {
+    setHealthOpenSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  async function onCopyHealthReport() {
+    if (!healthReport) return;
+    const text = formatHealthReportText(healthReport);
+    try {
+      await navigator.clipboard.writeText(text);
+      setToast({ text: "Отчёт скопирован в буфер обмена" });
+    } catch (e) {
+      setToast({
+        text: `Не удалось скопировать: ${e instanceof Error ? e.message : String(e)}`,
+        error: true,
+      });
+    }
   }
 
   return (
@@ -217,6 +266,98 @@ export function SessionPage() {
 
       <div className="panel">
         <div className="row" style={{ justifyContent: "space-between" }}>
+          <h2 style={{ margin: 0 }}>Health Report</h2>
+          <ActionButton
+            helpId="session.healthReport"
+            variant="primary"
+            disabled={healthBusy}
+            onClick={() => void onRunHealthReport()}
+          >
+            {healthBusy ? "Проверка…" : "Запустить проверку"}
+          </ActionButton>
+        </div>
+        <p className="lead">
+          Опрашивает комплекс целиком: NATS ядро, модули milk/coffee/water
+          (датчики + DX-токи), ComplexOS, сироп-дозатор, кассу/ККТ и бортовой
+          лог-логгер (если установлен) — и выдаёт что доступно, что нет и что
+          с этим делать.
+        </p>
+        {!healthReport ? (
+          <p className="muted">Нажмите «Запустить проверку», чтобы получить отчёт.</p>
+        ) : (
+          <>
+            <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
+              <span className={`badge${healthBadgeModifier(healthReport.overall)}`}>
+                {healthLevelLabel(healthReport.overall)} · {healthReport.summary}
+              </span>
+              <ActionButton onClick={() => void onCopyHealthReport()}>
+                Скопировать отчёт
+              </ActionButton>
+            </div>
+            {healthReport.sections.map((s) => {
+              const open = healthOpenSections.has(s.id);
+              return (
+                <div key={s.id} className="health-report-section">
+                  <button
+                    type="button"
+                    className="row"
+                    style={{
+                      width: "100%",
+                      justifyContent: "space-between",
+                      background: "none",
+                      border: "none",
+                      cursor: "pointer",
+                      padding: 0,
+                      color: "inherit",
+                      font: "inherit",
+                    }}
+                    onClick={() => toggleHealthSection(s.id)}
+                  >
+                    <strong>{s.label}</strong>
+                    <span className={`badge${healthBadgeModifier(s.level)}`}>
+                      {healthLevelLabel(s.level)} {open ? "▾" : "▸"}
+                    </span>
+                  </button>
+                  {open
+                    ? s.checks.map((c) => (
+                        <div key={c.id} className="health-report-check">
+                          <span className={`health-dot ${c.level}`} />
+                          <span>
+                            <strong>{c.label}:</strong> {c.message}
+                            {c.recommendation ? (
+                              <>
+                                {" "}
+                                <span className="muted">→ {c.recommendation}</span>
+                              </>
+                            ) : null}
+                          </span>
+                        </div>
+                      ))
+                    : null}
+                </div>
+              );
+            })}
+            {healthReport.recommendations.length > 0 ? (
+              <div className="health-report-section">
+                <strong>Рекомендации</strong>
+                <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                  {healthReport.recommendations.map((r, i) => (
+                    <li key={i} style={{ marginBottom: 4 }}>
+                      {r}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            <p className="muted" style={{ marginTop: 8 }}>
+              Проверка выполнена: {new Date(healthReport.at).toLocaleString()}
+            </p>
+          </>
+        )}
+      </div>
+
+      <div className="panel">
+        <div className="row" style={{ justifyContent: "space-between" }}>
           <h2 style={{ margin: 0 }}>Устройства в сети</h2>
           <ActionButton
             helpId="session.network"
@@ -340,4 +481,17 @@ function formatDeviceName(d: {
 function shouldShowError(connected: boolean, message: string): boolean {
   if (!connected) return true;
   return /нет|ошибк|протух|не удалось/i.test(message);
+}
+
+function healthBadgeModifier(level: HealthLevel): string {
+  switch (level) {
+    case "ok":
+      return " on";
+    case "warn":
+      return " warn";
+    case "error":
+      return " danger";
+    case "skip":
+      return "";
+  }
 }

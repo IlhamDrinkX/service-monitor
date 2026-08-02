@@ -147,6 +147,18 @@ export function mergeLabChartSyncEvents(
   return trimLabEvents([...prev, ...newer], max);
 }
 
+/** Newest finite `Date.parse(e.at)` without `Math.max(...arr)` (stack-safe for 250k). */
+export function maxLabEventAtMs(
+  events: ReadonlyArray<{ at: string }>
+): number | null {
+  let max = Number.NEGATIVE_INFINITY;
+  for (const e of events) {
+    const t = Date.parse(e.at);
+    if (Number.isFinite(t) && t > max) max = t;
+  }
+  return Number.isFinite(max) ? max : null;
+}
+
 /** `milk.input` — ключ ряда для комплексных графиков. */
 export function seriesKey(module: string, name: string): string {
   return `${module}.${name}`;
@@ -423,10 +435,13 @@ export function booleanStepSeries(
   const matching: Array<{ t: number; v: number }> = [];
   for (const e of events) {
     if (!eventMatchesSeries(e, name, kind)) continue;
-    if (e.value !== true && e.value !== false) continue;
+    let bit: number | null = null;
+    if (e.value === true || e.value === 1 || e.value === "1") bit = 1;
+    else if (e.value === false || e.value === 0 || e.value === "0") bit = 0;
+    if (bit == null) continue;
     const t = Date.parse(e.at);
     if (!Number.isFinite(t)) continue;
-    matching.push({ t, v: e.value ? 1 : 0 });
+    matching.push({ t, v: bit });
   }
   if (matching.length === 0) return [];
 
@@ -619,12 +634,26 @@ export function snapshotAt(
     }
 
     if (e.kind === "valve" || e.kind === "heater") {
-      if (e.value !== true && e.value !== false) continue;
+      if (
+        e.value !== true &&
+        e.value !== false &&
+        e.value !== 0 &&
+        e.value !== 1
+      ) {
+        continue;
+      }
       const key = seriesKey(e.module, e.name);
       const mapKey = `${e.kind}:${key}`;
       const prev = best.get(mapKey);
       if (!prev || Date.parse(prev.e.at) <= t) {
-        best.set(mapKey, { e, key, kind: e.kind });
+        best.set(mapKey, {
+          e: {
+            ...e,
+            value: e.value === true || e.value === 1,
+          },
+          key,
+          kind: e.kind,
+        });
       }
       continue;
     }

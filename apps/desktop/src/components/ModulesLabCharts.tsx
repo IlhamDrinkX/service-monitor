@@ -48,6 +48,17 @@ export async function openLabChartLogViewer(
     };
   }
   try {
+    const focus =
+      livePayload?.initialSensor ??
+      livePayload?.allSensors[0] ??
+      null;
+    // Open first so the window appears even if a large IPC sync is slow.
+    const res = await window.desktop.openLabChartWindow(
+      focus ? { focusSensor: focus } : {}
+    );
+    if (res && "ok" in res && res.ok === false) {
+      return { ok: false, error: res.error || "Не удалось открыть окно" };
+    }
     if (livePayload && livePayload.events.length > 0) {
       await window.desktop.syncLabChartState?.(livePayload);
     } else {
@@ -55,16 +66,6 @@ export async function openLabChartLogViewer(
       if (!current || typeof current !== "object") {
         await window.desktop.syncLabChartState?.(EMPTY_LAB_CHART_PAYLOAD);
       }
-    }
-    const focus =
-      livePayload?.initialSensor ??
-      livePayload?.allSensors[0] ??
-      null;
-    const res = await window.desktop.openLabChartWindow(
-      focus ? { focusSensor: focus } : {}
-    );
-    if (res && "ok" in res && res.ok === false) {
-      return { ok: false, error: res.error || "Не удалось открыть окно" };
     }
     return { ok: true };
   } catch (e) {
@@ -93,7 +94,8 @@ function buildSyncPayload(
   focus: string | null,
   valvesMap: Record<DrinkxHost, string[]>,
   heaterIds: string[],
-  liveActuators?: LabChartSyncPayload["liveActuators"]
+  liveActuators?: LabChartSyncPayload["liveActuators"],
+  overlays?: LabChartSyncPayload["overlays"]
 ): LabChartSyncPayload {
   return {
     events: trimLabEventsForChartSync(events),
@@ -102,6 +104,7 @@ function buildSyncPayload(
     valvesMap,
     heaterIds,
     liveActuators,
+    overlays,
   };
 }
 
@@ -114,6 +117,7 @@ export function buildLabChartSyncPayload(
     valvesMap?: Record<DrinkxHost, string[]>;
     heaterIds?: string[];
     liveActuators?: LabChartSyncPayload["liveActuators"];
+    overlays?: LabChartSyncPayload["overlays"];
   }
 ): LabChartSyncPayload {
   return buildSyncPayload(
@@ -122,7 +126,8 @@ export function buildLabChartSyncPayload(
     opts?.focus ?? allSensors[0] ?? null,
     opts?.valvesMap ?? { milk: [], coffee: [], water: [] },
     opts?.heaterIds ?? [],
-    opts?.liveActuators
+    opts?.liveActuators,
+    opts?.overlays
   );
 }
 
@@ -140,23 +145,6 @@ export function ModulesLabCharts({
   const [modalFallback, setModalFallback] = useState(false);
   const [focus, setFocus] = useState<string | null>(null);
   const [openError, setOpenError] = useState<string | null>(null);
-  /** Latest sync inputs — interval must NOT reset on every events render. */
-  const syncLatest = useRef({
-    events,
-    allSensors,
-    focus,
-    valvesMap,
-    heaterIds,
-    liveActuators,
-  });
-  syncLatest.current = {
-    events,
-    allSensors,
-    focus,
-    valvesMap,
-    heaterIds,
-    liveActuators,
-  };
 
   const valvesMap = useMemo(() => {
     if (valveIdsByModule) return valveIdsByModule;
@@ -175,6 +163,26 @@ export function ModulesLabCharts({
     }
     return [...set];
   }, [availableSensors, sensorNames, events]);
+
+  /** Latest sync inputs — interval must NOT reset on every events render.
+   * Declared after valvesMap/allSensors (TDZ): syncLatest used to read them
+   * before initialization and crashed ModulesLabCharts on mount. */
+  const syncLatest = useRef({
+    events,
+    allSensors,
+    focus,
+    valvesMap,
+    heaterIds,
+    liveActuators,
+  });
+  syncLatest.current = {
+    events,
+    allSensors,
+    focus,
+    valvesMap,
+    heaterIds,
+    liveActuators,
+  };
 
   const groupedNames = useMemo(() => {
     if (!groupByModule) return null;
@@ -216,7 +224,8 @@ export function ModulesLabCharts({
     }
 
     try {
-      await window.desktop.syncLabChartState(payload);
+      // Open first, then sync — large trimLabEventsForChartSync payloads
+      // must not block BrowserWindow creation.
       const res = await window.desktop.openLabChartWindow({
         focusSensor: sensor,
       });
@@ -225,6 +234,7 @@ export function ModulesLabCharts({
         setOpenError(res.error || "Не удалось открыть окно");
         return;
       }
+      await window.desktop.syncLabChartState(payload);
       setChartOpen(true);
       setModalFallback(false);
     } catch (e) {

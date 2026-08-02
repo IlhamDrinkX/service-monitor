@@ -1,0 +1,10 @@
+# No runtime dependencies. NatsSource uses sm_lab_logger/mini_nats.py, a
+# stdlib-only synchronous NATS client — deliberately NOT nats-py.
+#
+# Field complexos hosts typically have LAN + a reverse SSH tunnel to the ERP
+# jump host but no route to PyPI. An earlier revision required `nats-py` and
+# soft-installed it with `pip install --user` during SM install; that pip
+# step silently failed offline, `import nats` then raised ImportError, and
+# the agent fell back to an idle no-op loop forever (source=idle, empty
+# ring) — see .agent-notes/CHANGELOG_AGENT.md 2026-08-02 for the incident.
+# Do not reintroduce a pip dependency on this path without re-reading that.

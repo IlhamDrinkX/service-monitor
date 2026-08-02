@@ -50,6 +50,17 @@ import {
 } from "./nats-service";
 import { syrupCheckSsh, syrupModbusScan } from "./syrup-service";
 import { probePosHost } from "./pos-host-probe";
+import {
+  labLoggerDownloadRing,
+  labLoggerFetchEvents,
+  labLoggerFetchHealth,
+  labLoggerFetchSnapshot,
+  labLoggerInstall,
+  labLoggerSetAutostart,
+  labLoggerSetRetention,
+  labLoggerStatus,
+  labLoggerUninstall,
+} from "./lab-logger-service";
 import { flashPartA, flashPartB } from "./flash-service";
 import {
   clearSessionPrefs,
@@ -860,6 +871,64 @@ function registerIpc(): void {
     }
     return res;
   });
+
+  const labId = () => ({ identityFile: defaultIdentityPath() });
+
+  ipcMain.handle("labLogger:status", async () => {
+    const res = await labLoggerStatus(labId());
+    if (!res.ok) logger.warn("labLogger", "status failed", { error: res.error });
+    return res;
+  });
+  ipcMain.handle(
+    "labLogger:install",
+    async (
+      _e,
+      input?: { retainHours?: number; enableAutostart?: boolean }
+    ) => {
+      const res = await labLoggerInstall({ ...labId(), ...input });
+      if (res.ok) logger.info("labLogger", "install ok", { sha256: res.sha256 });
+      else logger.warn("labLogger", "install failed", { error: res.error });
+      return res;
+    }
+  );
+  ipcMain.handle(
+    "labLogger:uninstall",
+    async (_e, input?: { wipeData?: boolean }) => {
+      const res = await labLoggerUninstall({ ...labId(), ...input });
+      if (!res.ok) logger.warn("labLogger", "uninstall failed", { error: res.error });
+      return res;
+    }
+  );
+  ipcMain.handle(
+    "labLogger:setAutostart",
+    async (_e, input: { enabled: boolean }) => {
+      return labLoggerSetAutostart({ ...labId(), enabled: Boolean(input?.enabled) });
+    }
+  );
+  ipcMain.handle(
+    "labLogger:setRetention",
+    async (_e, input: { retainHours: number }) => {
+      return labLoggerSetRetention({
+        ...labId(),
+        retainHours: Number(input?.retainHours),
+      });
+    }
+  );
+  ipcMain.handle("labLogger:fetchHealth", async () =>
+    labLoggerFetchHealth(labId())
+  );
+  ipcMain.handle("labLogger:fetchSnapshot", async () =>
+    labLoggerFetchSnapshot(labId())
+  );
+  ipcMain.handle(
+    "labLogger:fetchEvents",
+    async (_e, input?: { fromTs?: number }) =>
+      labLoggerFetchEvents({ ...labId(), fromTs: input?.fromTs })
+  );
+  ipcMain.handle("labLogger:downloadRing", async () =>
+    labLoggerDownloadRing(labId())
+  );
+
   ipcMain.handle(
     "syrup:modbusScan",
     async (

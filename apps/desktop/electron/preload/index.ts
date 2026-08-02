@@ -210,6 +210,43 @@ export type DesktopApi = {
       }
     | { ok: false; error: string }
   >;
+  /** Бортовой lab-logger на complexos (install / status / view / download). */
+  labLoggerStatus: () => Promise<
+    | { ok: true; status: import("@service-monitor/core").LabLoggerStatus }
+    | { ok: false; error: string }
+  >;
+  labLoggerInstall: (input?: {
+    retainHours?: number;
+    enableAutostart?: boolean;
+  }) => Promise<
+    | { ok: true; sha256: string; fileCount: number; message: string }
+    | { ok: false; error: string }
+  >;
+  labLoggerUninstall: (input?: {
+    wipeData?: boolean;
+  }) => Promise<{ ok: true; message: string } | { ok: false; error: string }>;
+  labLoggerSetAutostart: (input: {
+    enabled: boolean;
+  }) => Promise<{ ok: true; message: string } | { ok: false; error: string }>;
+  labLoggerSetRetention: (input: {
+    retainHours: number;
+  }) => Promise<{ ok: true; message: string } | { ok: false; error: string }>;
+  labLoggerFetchHealth: () => Promise<
+    | { ok: true; health: import("@service-monitor/core").LabLoggerHealth }
+    | { ok: false; error: string }
+  >;
+  labLoggerFetchSnapshot: () => Promise<
+    { ok: true; snapshot: unknown } | { ok: false; error: string }
+  >;
+  labLoggerFetchEvents: (input?: {
+    fromTs?: number;
+  }) => Promise<
+    { ok: true; events: unknown[] } | { ok: false; error: string }
+  >;
+  labLoggerDownloadRing: () => Promise<
+    | { ok: true; path: string; bytes: number }
+    | { ok: false; error: string }
+  >;
   syrupModbusScan: (input: {
     mode: "scan" | "motor";
     maxId?: number;
@@ -390,6 +427,19 @@ const api: DesktopApi = {
   },
   syrupCheckSsh: () => ipcRenderer.invoke("syrup:checkSsh"),
   posProbeHost: () => ipcRenderer.invoke("pos:probeHost"),
+  labLoggerStatus: () => ipcRenderer.invoke("labLogger:status"),
+  labLoggerInstall: (input) => ipcRenderer.invoke("labLogger:install", input),
+  labLoggerUninstall: (input) =>
+    ipcRenderer.invoke("labLogger:uninstall", input),
+  labLoggerSetAutostart: (input) =>
+    ipcRenderer.invoke("labLogger:setAutostart", input),
+  labLoggerSetRetention: (input) =>
+    ipcRenderer.invoke("labLogger:setRetention", input),
+  labLoggerFetchHealth: () => ipcRenderer.invoke("labLogger:fetchHealth"),
+  labLoggerFetchSnapshot: () => ipcRenderer.invoke("labLogger:fetchSnapshot"),
+  labLoggerFetchEvents: (input) =>
+    ipcRenderer.invoke("labLogger:fetchEvents", input),
+  labLoggerDownloadRing: () => ipcRenderer.invoke("labLogger:downloadRing"),
   syrupModbusScan: (input) => ipcRenderer.invoke("syrup:modbusScan", input),
   flashPartA: (config) => ipcRenderer.invoke("flash:partA", config),
   flashPartB: (config) => ipcRenderer.invoke("flash:partB", config),

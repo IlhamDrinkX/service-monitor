@@ -18,6 +18,7 @@ describe("desktop / stage0 content wiring", () => {
       "nav.modules",
       "nav.peripherals",
       "nav.complexos",
+      "nav.labLogger",
       "nav.config",
       "nav.help",
       "nav.settings",

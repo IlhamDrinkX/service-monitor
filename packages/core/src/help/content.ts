@@ -62,6 +62,56 @@ export const CONTROL_HELPS: Record<string, ControlHelp> = {
     title: "Касса / ККТ",
     body: "Принтер чеков/этикеток (ft-printer-drv) и эквайринг (ft-payments-drv) через NATS. Health — без пароля; закрытие смены и тест этикетки — после пароля кассы.",
   },
+  "nav.labLogger": {
+    id: "nav.labLogger",
+    title: "Бортовой лог",
+    body: "Установка Python lab-logger на complexos (серия 4.x): /home/pi/sm-lab-logger + systemd --user. Опрос той же картины, что Modules Lab (NATS valves/heaters/pumps + DX :8000 токи/ШИМ). Два режима просмотра: realtime (SSH curl /lab/events → окно графика) и скачивание полного ring (.jsonl). На комплексе — delta+heartbeat. Без плотного Lab dual-poll с ноутбука.",
+  },
+  "labLogger.path": {
+    id: "labLogger.path",
+    title: "Путь установки",
+    body: "Канонический каталог на complexos: /home/pi/sm-lab-logger (пользователь SSH pi). Unit: /home/pi/.config/systemd/user/sm-lab-logger.service. Install, статус и autostart всегда смотрят на эти же пути — не $HOME другого пользователя.",
+  },
+  "labLogger.uninstall": {
+    id: "labLogger.uninstall",
+    title: "Удаление",
+    body: "stop/disable unit (если unit нет — soft ok), daemon-reload, удаляет весь каталог /home/pi/sm-lab-logger (код + data/ + lock) и unit-файл. По умолчанию стереть всё. Не трогает другие сервисы complexos.",
+  },
+  "labLogger.install": {
+    id: "labLogger.install",
+    title: "Установка логгера",
+    body: "Заливает бандл в /home/pi/sm-lab-logger, soft pip install nats-py, ставит unit, daemon-reload, enable+start. Источник по умолчанию — NATS 127.0.0.1:4222 (тот же poll set, что Modules: клапаны MODULE_VALVES, тэны, насосы, DX HTTP .44/.45/.46:8000). Без nats-py → source=idle (soft). FakeSource только явно (--fake-source).",
+  },
+  "labLogger.status": {
+    id: "labLogger.status",
+    title: "Статус",
+    body: "Проверяет main.py/пакет, systemctl --user, процесс python и curl /lab/health. source=NATS — живой poll; source=idle — нет nats-py/NATS. «установлен (остановлен)» — файлы есть, сервис не active.",
+  },
+  "labLogger.autostart": {
+    id: "labLogger.autostart",
+    title: "Autostart",
+    body: "systemctl --user enable/disable sm-lab-logger + loginctl enable-linger (чтобы user-unit жил без графической сессии). После enable сервис стартует сразу.",
+  },
+  "labLogger.retention": {
+    id: "labLogger.retention",
+    title: "Retention",
+    body: "Пишет retain_hours в /home/pi/sm-lab-logger/config.json и делает restart unit. Диапазон обычно 1–168 ч.",
+  },
+  "labLogger.view": {
+    id: "labLogger.view",
+    title: "Превью snapshot / events",
+    body: "Разово читает /lab/snapshot и /lab/events через SSH curl на 127.0.0.1:8765 — для проверки HTTP. Полный архив — кнопка «Скачать полный ring». Не включает Modules Lab telemetry.",
+  },
+  "labLogger.realtime": {
+    id: "labLogger.realtime",
+    title: "Realtime",
+    body: "Тянет /lab/events с complexos и рисует seriesKey как Modules (milk.drain, *.heater1_pwm, *.pumpCurrent, …). Не стартует плотный LabTelemetry на ноутбуке. Интервал по умолчанию 1500 ms, минимум 1000 ms (SSH).",
+  },
+  "labLogger.download": {
+    id: "labLogger.download",
+    title: "Скачать полный ring",
+    body: "Копирует data/lab-events.jsonl с complexos. Диалог только *.jsonl; путь принудительно нормализуется (Windows .txt / без расширения → .jsonl).",
+  },
   "nav.complexos": {
     id: "nav.complexos",
     title: "ComplexOS",
@@ -567,6 +617,18 @@ export const CONTROL_HELPS: Record<string, ControlHelp> = {
       "на 80 порту (или он выключен). Сеть при этом может работать нормально.",
       "",
       "Online — открылась HTTP-морда на 192.168.1.1 (через туннель :8081).",
+    ].join("\n"),
+  },
+  "session.healthReport": {
+    id: "session.healthReport",
+    title: "Health Report",
+    body: [
+      "Одна кнопка опрашивает весь комплекс: ядро NATS (muster), датчики и DX-токи milk/coffee/water, ComplexOS core, сироп-дозатор, кассу/ККТ и бортовой lab-logger (если установлен).",
+      "",
+      "Каждый раздел получает статус OK / Внимание / Проблема и (если что-то не так) конкретную рекомендацию что проверить на месте.",
+      "",
+      "Без активной сессии отчёт покажет только это — подключитесь на этой же вкладке и запустите проверку снова.",
+      "«Скопировать отчёт» — простой текст для чата с командой/тикета.",
     ].join("\n"),
   },
   "session.network": {

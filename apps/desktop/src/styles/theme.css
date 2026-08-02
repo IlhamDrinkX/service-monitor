@@ -468,10 +468,56 @@ textarea.code-editor {
   border-color: rgba(110, 207, 140, 0.35);
 }
 
+.badge.warn {
+  color: var(--warn);
+  border-color: rgba(224, 163, 90, 0.4);
+  background: rgba(224, 163, 90, 0.1);
+}
+
 .badge.danger {
   color: var(--danger);
   border-color: rgba(224, 113, 113, 0.45);
   background: rgba(224, 113, 113, 0.1);
+}
+
+.health-report-section {
+  border: 1px solid var(--stroke);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-top: 8px;
+}
+
+.health-report-check {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 3px 0;
+  font-size: 0.85rem;
+}
+
+.health-report-check .health-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-top: 4px;
+}
+
+.health-dot.ok {
+  background: var(--ok);
+}
+
+.health-dot.warn {
+  background: var(--warn);
+}
+
+.health-dot.error {
+  background: var(--danger);
+}
+
+.health-dot.skip {
+  background: var(--text-muted);
+  opacity: 0.5;
 }
 
 .app-shell.session-warn {
@@ -1821,6 +1867,55 @@ textarea.code-editor {
   border-radius: 8px;
   padding: 10px;
   overflow: auto;
+}
+
+/* Бортовой лог: статус / журнал без горизонтального overflow */
+.lab-logger-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 10px;
+  max-width: 100%;
+}
+
+.lab-logger-status-part {
+  display: inline-block;
+  max-width: 100%;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: var(--bg-soft);
+  border: 1px solid var(--stroke);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.lab-logger-health {
+  margin-top: 8px;
+  max-width: 100%;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+pre.log,
+.log {
+  display: block;
+  max-width: 100%;
+  margin: 0;
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  background: #0a0e13;
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius);
+  color: #b7c9b0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 960px) {

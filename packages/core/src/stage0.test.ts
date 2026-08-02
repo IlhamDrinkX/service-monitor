@@ -80,6 +80,7 @@ describe("stage0 / help", () => {
   it("has control helps for primary navigation actions", () => {
     assert.equal(getControlHelp("nav.fleet")?.title, "Флот");
     assert.equal(getControlHelp("nav.pos")?.title, "Касса / ККТ");
+    assert.equal(getControlHelp("nav.labLogger")?.title, "Бортовой лог");
     assert.match(getControlHelp("session.dashboard")?.body ?? "", /8080/);
     assert.ok(HELP_ARTICLES.length >= 4);
     assert.ok(getControlHelp("modules.nats"));

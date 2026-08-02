@@ -21,7 +21,15 @@ import {
   booleanStepSeries,
   chartSeriesMeta,
   chartSinceMs,
+  collectOnboardSeriesKeys,
+  complexSensorCatalog,
+  convertOnboardRecordsToLabEvents,
   isFiniteSeriesValue,
+  maxLabEventAtMs,
+  onboardHeaterIds,
+  onboardHeaterPwmOverlayKeys,
+  onboardPumpOverlayHosts,
+  onboardValveOverlayKeys,
   parseSeriesKey,
   pumpPowerSeries,
   sensorSeries,
@@ -30,6 +38,7 @@ import {
   seriesPathD,
   seriesYDomain,
   snapshotAt,
+  valvesMapFromOnboardEvents,
   type ChartTimeScale,
   type DrinkxHost,
   type LabEvent,
@@ -70,6 +79,13 @@ export type LabChartSyncPayload = {
     valves: Record<string, boolean>;
     pumps: Partial<Record<DrinkxHost, boolean>>;
   };
+  /** Live sync / onboard: auto-enable these valve overlays (`milk.drain`). */
+  overlays?: {
+    valves?: string[];
+    pumpOn?: DrinkxHost[];
+    pumpPower?: DrinkxHost[];
+    heaterPwm?: string[];
+  };
 };
 
 /** Пустой снимок для окна графика без сессии / до импорта лога. */
@@ -83,6 +99,25 @@ export const EMPTY_LAB_CHART_PAYLOAD: LabChartSyncPayload = {
 
 const LOG_KIND = "service-monitor-lab-chart";
 const LOG_VERSION = 1;
+
+/**
+ * Canonical Modules chart order (`complexSensorCatalog()`: per module —
+ * overheats, input, pumpCurrent, heater outs, pumpPower, pumpCurrentL,
+ * heater PWMs — milk → coffee → water), used to order both the sidebar
+ * sensor checklist and the plotted lanes. Onboard events arrive in whatever
+ * order the poller happens to emit them each tick (facade sensors, then
+ * heaters, then pumps, then DX) — reusing that as display order produced a
+ * chart layout that didn't resemble the Modules tab at all (e.g. all heater
+ * PWM lanes grouped together instead of sitting next to their own module's
+ * readings). Anything not in the fixed catalog (unexpected/future sensor
+ * name) still shows, just appended after in first-seen order.
+ */
+const SENSOR_CATALOG_RANK: ReadonlyMap<string, number> = new Map(
+  complexSensorCatalog().map((key, i) => [key, i])
+);
+function sensorCatalogRank(key: string): number {
+  return SENSOR_CATALOG_RANK.get(key) ?? Number.MAX_SAFE_INTEGER;
+}
 
 function heaterPwmKey(mod: DrinkxHost, hid: string): string {
   return seriesKey(mod, `${hid}_pwm`);
@@ -179,6 +214,34 @@ function isLabChartLog(raw: unknown): raw is {
   );
 }
 
+/**
+ * Parse a ring downloaded via «Скачать полный ring» — **JSON Lines** (one
+ * record per line: LabEvent delta or heartbeat Snapshot), NOT a single JSON
+ * document. Returns null if the text doesn't look like that format at all
+ * (e.g. it's actually the "Импорт лога" single-JSON export, or garbage).
+ *
+ * This is what previously crashed with a raw
+ * "Unexpected non-whitespace character after JSON at position …" — that
+ * message is `JSON.parse()` choking on line 2 of a multi-line ring file
+ * because the whole file was parsed as one JSON value instead of per line.
+ */
+function parseOnboardRingJsonl(text: string): unknown[] | null {
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return null;
+  const records: unknown[] = [];
+  for (const line of lines) {
+    if (!line.startsWith("{")) return null;
+    try {
+      const rec: unknown = JSON.parse(line);
+      if (!rec || typeof rec !== "object" || Array.isArray(rec)) return null;
+      records.push(rec);
+    } catch {
+      return null;
+    }
+  }
+  return records;
+}
+
 type ContinuousSeries = {
   id: string;
   label: string;
@@ -202,6 +265,7 @@ export function LabChartPanel({
   valvesMap,
   heaterIds,
   liveActuators: _liveActuators,
+  overlays,
   windowMode = false,
 }: LabChartSyncPayload & { windowMode?: boolean }) {
   const [replay, setReplay] = useState<LabChartSyncPayload | null>(null);
@@ -214,7 +278,9 @@ export function LabChartPanel({
   const [panOffsetMs, setPanOffsetMs] = useState(0);
   const [showPumpOn, setShowPumpOn] = useState<Set<DrinkxHost>>(() => new Set());
   const [showPumpPower, setShowPumpPower] = useState<Set<DrinkxHost>>(() => new Set());
-  const [valvesOn, setValvesOn] = useState<Set<string>>(() => new Set());
+  const [valvesOn, setValvesOn] = useState<Set<string>>(
+    () => new Set(overlays?.valves ?? [])
+  );
   const [heaterPwmOn, setHeaterPwmOn] = useState<Set<string>>(() => new Set());
   const [markerT, setMarkerT] = useState<number | null>(null);
   const [overlaysOpen, setOverlaysOpen] = useState(false);
@@ -232,16 +298,46 @@ export function LabChartPanel({
     return () => clearInterval(id);
   }, [windowMode, replay]);
 
+  /** Onboard / sync: enable valve overlays listed in payload.overlays.valves. */
+  useEffect(() => {
+    const keys = overlays?.valves;
+    if (!keys?.length) return;
+    setValvesOn((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      for (const k of keys) {
+        if (!next.has(k)) {
+          next.add(k);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [overlays?.valves]);
+
+  useEffect(() => {
+    const pumps = overlays?.pumpOn;
+    if (!pumps?.length) return;
+    setShowPumpOn((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      for (const h of pumps) {
+        if (!next.has(h)) {
+          next.add(h);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [overlays?.pumpOn]);
+
   const effectiveEvents = replay?.events ?? events;
   const effectiveSensors = replay?.allSensors ?? allSensors;
   const effectiveValvesMap = replay?.valvesMap ?? valvesMap;
   const effectiveHeaterIds = replay?.heaterIds ?? heaterIds;
   const replayNow = useMemo(() => {
     if (!replay) return null;
-    const times = replay.events
-      .map((event) => Date.parse(event.at))
-      .filter(Number.isFinite);
-    return times.length > 0 ? Math.max(...times) : null;
+    return maxLabEventAtMs(replay.events);
   }, [replay]);
   const clockNow = replayNow ?? (windowMode ? wallNow : Date.now());
 
@@ -382,6 +478,23 @@ export function LabChartPanel({
       });
       ci += 1;
     };
+    // Canonical Modules order first (see SENSOR_CATALOG_RANK) — covers plain
+    // sensors, pumpPower and heater PWM together, module by module.
+    for (const key of complexSensorCatalog()) {
+      const { module: mod, name: local } = parseSeriesKey(key);
+      if (local === "pumpPower") {
+        if (showPumpPower.has(mod as DrinkxHost)) pushSeries(key);
+        continue;
+      }
+      if (local.endsWith("_pwm")) {
+        if (heaterPwmOn.has(key)) pushSeries(key);
+        continue;
+      }
+      if (selected.has(key)) pushSeries(key);
+    }
+    // Anything selected/enabled but outside the fixed catalog (unexpected or
+    // future sensor names) — still shown, appended after (pushSeries dedupes
+    // ids already added above, so this is a pure fallback pass).
     for (const name of effectiveSensors) {
       if (selected.has(name)) pushSeries(name);
     }
@@ -492,6 +605,11 @@ export function LabChartPanel({
         map[module].push(key);
       }
     }
+    // Sidebar checklist order should match the plotted order (see
+    // SENSOR_CATALOG_RANK) instead of raw event-arrival order.
+    for (const mod of DRINKX_HOSTS) {
+      map[mod].sort((a, b) => sensorCatalogRank(a) - sensorCatalogRank(b));
+    }
     return map;
   }, [effectiveSensors]);
 
@@ -560,38 +678,93 @@ export function LabChartPanel({
     URL.revokeObjectURL(url);
   }
 
+  /** Onboard ring (.jsonl from «Скачать полный ring») → replay payload. */
+  function loadOnboardRingReplay(records: unknown[]): void {
+    const converted = convertOnboardRecordsToLabEvents(records, "onboard-import");
+    if (converted.length === 0) {
+      throw new Error(
+        "Ring пуст или не содержит распознаваемых записей (v/ts/kind/module/name)"
+      );
+    }
+    const importedSensors = collectOnboardSeriesKeys(converted);
+    const payload: LabChartSyncPayload = {
+      events: converted,
+      allSensors: importedSensors,
+      initialSensor: null,
+      valvesMap: valvesMapFromOnboardEvents(converted),
+      heaterIds: (() => {
+        const ids = onboardHeaterIds(converted);
+        return ids.length ? ids : heaterIds;
+      })(),
+    };
+    setReplay(payload);
+    setSelected(new Set(importedSensors.slice(0, 1)));
+    setValvesOn(new Set(onboardValveOverlayKeys(converted)));
+    setShowPumpOn(new Set(onboardPumpOverlayHosts(converted)));
+    setShowPumpPower(new Set());
+    setHeaterPwmOn(new Set(onboardHeaterPwmOverlayKeys(converted)));
+    setMarkerT(null);
+    setSliceOpen(true);
+  }
+
   async function importChartLog(file: File) {
     try {
-      const raw: unknown = JSON.parse(await file.text());
-      if (!isLabChartLog(raw) || raw.version !== LOG_VERSION) {
-        throw new Error("Неподдерживаемый формат лога");
+      const text = await file.text();
+
+      // 1) LabChartPanel's own single-JSON "Экспорт лога" format.
+      let raw: unknown = null;
+      let wholeFileParseError: unknown = null;
+      try {
+        raw = JSON.parse(text);
+      } catch (e) {
+        wholeFileParseError = e;
       }
-      const importedSensors = raw.allSensors ?? allSensors;
-      const payload: LabChartSyncPayload = {
-        events: raw.events,
-        allSensors: importedSensors,
-        initialSensor: null,
-        valvesMap: raw.valvesMap ?? valvesMap,
-        heaterIds: raw.heaterIds ?? heaterIds,
-      };
-      setReplay(payload);
-      setSelected(new Set(raw.selected ?? importedSensors.slice(0, 1)));
-      setValvesOn(new Set(raw.overlays?.valves ?? []));
-      setShowPumpOn(new Set(raw.overlays?.pumpOn ?? []));
-      setShowPumpPower(new Set(raw.overlays?.pumpPower ?? []));
-      setHeaterPwmOn(new Set(raw.overlays?.heaterPwm ?? []));
-      if (raw.timeScale) setTimeScale(raw.timeScale);
-      if (raw.yScale) setYScale(raw.yScale);
-      if (raw.sliceOrder) {
-        setSliceOrder({
-          milk: raw.sliceOrder.milk ?? [],
-          coffee: raw.sliceOrder.coffee ?? [],
-          water: raw.sliceOrder.water ?? [],
-        });
+      if (raw != null && isLabChartLog(raw) && raw.version === LOG_VERSION) {
+        const importedSensors = raw.allSensors ?? allSensors;
+        const payload: LabChartSyncPayload = {
+          events: raw.events,
+          allSensors: importedSensors,
+          initialSensor: null,
+          valvesMap: raw.valvesMap ?? valvesMap,
+          heaterIds: raw.heaterIds ?? heaterIds,
+        };
+        setReplay(payload);
+        setSelected(new Set(raw.selected ?? importedSensors.slice(0, 1)));
+        setValvesOn(new Set(raw.overlays?.valves ?? []));
+        setShowPumpOn(new Set(raw.overlays?.pumpOn ?? []));
+        setShowPumpPower(new Set(raw.overlays?.pumpPower ?? []));
+        setHeaterPwmOn(new Set(raw.overlays?.heaterPwm ?? []));
+        if (raw.timeScale) setTimeScale(raw.timeScale);
+        if (raw.yScale) setYScale(raw.yScale);
+        if (raw.sliceOrder) {
+          setSliceOrder({
+            milk: raw.sliceOrder.milk ?? [],
+            coffee: raw.sliceOrder.coffee ?? [],
+            water: raw.sliceOrder.water ?? [],
+          });
+        }
+        const importedMarker = raw.markerAt ? Date.parse(raw.markerAt) : NaN;
+        setMarkerT(Number.isFinite(importedMarker) ? importedMarker : null);
+        setSliceOpen(true);
+        return;
       }
-      const importedMarker = raw.markerAt ? Date.parse(raw.markerAt) : NaN;
-      setMarkerT(Number.isFinite(importedMarker) ? importedMarker : null);
-      setSliceOpen(true);
+
+      // 2) Онлайн-логгер ring (.jsonl — «Скачать полный ring» в «Бортовом
+      // логе»): одна JSON-запись на строку, не единый JSON-документ. Раньше
+      // здесь падал сырой "Unexpected non-whitespace character after JSON…"
+      // от JSON.parse() на весь файл сразу.
+      const ringRecords = parseOnboardRingJsonl(text);
+      if (ringRecords) {
+        loadOnboardRingReplay(ringRecords);
+        return;
+      }
+
+      // Ни один формат не подошёл — понятная ошибка вместо сырого JSON.parse.
+      throw new Error(
+        wholeFileParseError
+          ? "Неподдерживаемый файл: ожидается «Экспорт лога» (.json) этого окна или ring бортового логгера (.jsonl)"
+          : "Неподдерживаемый формат лога"
+      );
     } catch (error) {
       window.alert(
         error instanceof Error ? error.message : "Не удалось импортировать лог"

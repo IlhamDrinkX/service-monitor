@@ -94,8 +94,17 @@ export class LabTelemetryController {
   private tickN = 0;
   private milkSystemHoldUntil = 0;
   private lastOtherStatusAt = 0;
+  private readonly deps: LabTelemetryDeps;
 
-  constructor(private readonly deps: LabTelemetryDeps) {}
+  // Plain field assignment, not a TS "parameter property" — Node's
+  // --experimental-strip-types (used by `npm test`) can erase type
+  // annotations but cannot execute parameter-property constructor syntax,
+  // so `constructor(private readonly deps: ...)` fails to import at all
+  // under the test runner. This was the reason this class had no unit
+  // tests: it couldn't even be imported by them.
+  constructor(deps: LabTelemetryDeps) {
+    this.deps = deps;
+  }
 
   getSnapshot(): LabSnapshot {
     return this.snap;

@@ -1,0 +1,36 @@
+# Service Monitor Lab onboard logger (systemd --user)
+
+# Installed by SM to ~/.config/systemd/user/sm-lab-logger.service
+
+# Default: real NATS on localhost via stdlib mini_nats.py (no nats-py/pip). Demo: add --fake-source.
+
+
+
+[Unit]
+
+Description=Service Monitor Lab onboard logger
+
+After=network.target
+
+
+
+[Service]
+
+Type=simple
+
+WorkingDirectory=/home/pi/sm-lab-logger
+
+ExecStart=/usr/bin/python3 /home/pi/sm-lab-logger/main.py --config /home/pi/sm-lab-logger/config.json --http-port 8765
+
+Restart=on-failure
+
+RestartSec=5
+
+Nice=10
+
+
+
+[Install]
+
+WantedBy=default.target
+

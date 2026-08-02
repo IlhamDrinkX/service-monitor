@@ -1,6 +1,6 @@
 {
   "name": "@service-monitor/desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Service Monitor desktop shell (Electron)",
   "author": "Fibbee / DrinkX",
@@ -9,7 +9,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
-    "test": "node --test --experimental-strip-types src/stage0.desktop.test.ts src/pos.desktop.test.ts src/modules.desktop.test.ts",
+    "test": "node --test --experimental-strip-types src/stage0.desktop.test.ts src/pos.desktop.test.ts src/modules.desktop.test.ts src/labLogger.desktop.test.ts src/lab/LabTelemetryController.test.ts",
     "preview": "electron-vite preview",
     "dist": "npm run build && node ../../scripts/electron-builder-dist.cjs",
     "dist:win": "npm run build && node ../../scripts/electron-builder-win.cjs",

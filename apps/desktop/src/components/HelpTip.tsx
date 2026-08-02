@@ -4,6 +4,7 @@
  */
 
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { getControlHelp } from "@service-monitor/core";
 
 type Place = { top: number; left: number };
@@ -72,18 +73,28 @@ export function HelpTip({ controlId }: { controlId: string }) {
       >
         ?
       </button>
-      {open ? (
-        <div
-          className="help-popover"
-          id={popoverId}
-          role="dialog"
-          ref={popRef}
-          style={{ top: place.top, left: place.left }}
-        >
-          <strong>{help.title}</strong>
-          <p>{help.body}</p>
-        </div>
-      ) : null}
+      {open
+        ? createPortal(
+            // Портал в <body>: контейнеры вроде левого меню используют
+            // backdrop-filter/overflow:hidden, а backdrop-filter (как и
+            // filter/transform) делает предка containing block для
+            // position:fixed — попап рисовался с координатами вьюпорта, но
+            // обрезался/смещался рамками узкой боковой панели. Вне неё
+            // position:fixed снова считается от окна, как и вычисляется в
+            // useLayoutEffect ниже.
+            <div
+              className="help-popover"
+              id={popoverId}
+              role="dialog"
+              ref={popRef}
+              style={{ top: place.top, left: place.left }}
+            >
+              <strong>{help.title}</strong>
+              <p>{help.body}</p>
+            </div>,
+            document.body
+          )
+        : null}
     </div>
   );
 }

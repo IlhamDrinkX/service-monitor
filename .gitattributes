@@ -1,0 +1,20 @@
+# Force LF on shell/Node scripts regardless of the committer's OS.
+# Without this, checking out on Windows with core.autocrlf=true (or any
+# CRLF-converting sync/editor) and then committing back turns the shebang
+# line into "#!/usr/bin/env bash\r", which fails on macOS/Linux with
+# "bad interpreter: ... : no such file or directory" — silently breaking
+# the double-click .command / curl|bash install flow for beta testers.
+*.sh    text eol=lf
+*.command text eol=lf
+*.cjs   text eol=lf
+*.mjs   text eol=lf
+*.js    text eol=lf
+
+# Windows-only scripts: keep native CRLF (cmd.exe/PowerShell prefer it,
+# and it avoids a class of unrelated parse issues on old PowerShell).
+*.ps1   text eol=crlf
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+
+# Everything else: let git normalize line endings, but don't force an eol.
+* text=auto

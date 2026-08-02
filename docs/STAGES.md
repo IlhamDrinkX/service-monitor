@@ -95,7 +95,9 @@
 
 - Полный port `flash_obraz` (ansible) in-app
 - Расширенный brew UI (tweaks/menu items) поверх Brew Lab
-- Split ModulesPage (terminal / scenarios / actuators)
-- LabTelemetryController unit tests
+- ~~Split ModulesPage (terminal / scenarios / actuators)~~ **done** (commit `bfb3fba`) — `ModulesPage.tsx` теперь composition root (~400 строк), логика разнесена по `components/modules/*Panel.tsx` (валвы/насос/тены/сервис/терминал/сценарии/сенсоры) + хукам `lab/modulesLab/*`. Крупнейший оставшийся файл в этой области — `components/ModulesLabCharts.tsx` (~600 строк, окно графиков), не смешивает terminal/scenarios/actuators.
+- ~~LabTelemetryController unit tests~~ **done** (2026-08-02) — 13 тестов, `apps/desktop/src/lab/LabTelemetryController.test.ts`.
+- Health Report (вкладка «Сессия») — **done** (2026-08-02) — одна кнопка опрашивает NATS/модули/DX/ComplexOS/сироп/ККТ/lab-logger.
+- XOR-настройка (отключение плотного опроса с ноутбука при активном бортовом realtime) — задокументирована, ещё не подключена в UI Настроек.
 - Android native SSH/NATS runtime
 - Подпись кода (Apple notarization / Windows Authenticode) для публичных релизов

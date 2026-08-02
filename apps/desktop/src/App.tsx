@@ -13,6 +13,7 @@ import { FleetPage } from "./pages/FleetPage";
 import { HelpPage } from "./pages/HelpPage";
 import { ModulesPage } from "./pages/ModulesPage";
 import { PeripheralsPage } from "./pages/PeripheralsPage";
+import { LabLoggerPage } from "./pages/LabLoggerPage";
 import { PosPage } from "./pages/PosPage";
 import { SessionPage } from "./pages/SessionPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -40,6 +41,7 @@ type TabId =
   | "modules"
   | "peripherals"
   | "pos"
+  | "labLogger"
   | "complexos"
   | "config"
   | "help"
@@ -83,6 +85,13 @@ const TABS: Array<{
     icon: "⊞",
     helpId: "nav.complexos",
     title: "ComplexOS · сервис",
+  },
+  {
+    id: "labLogger",
+    label: "Бортовой лог",
+    icon: "◍",
+    helpId: "nav.labLogger",
+    title: "Бортовой lab-logger · complexos",
   },
   {
     id: "config",
@@ -242,6 +251,7 @@ function AppShell() {
               {tab === "session" ? <SessionPage /> : null}
               {tab === "peripherals" ? <PeripheralsPage /> : null}
               {tab === "pos" ? <PosPage /> : null}
+              {tab === "labLogger" ? <LabLoggerPage /> : null}
               {tab === "complexos" ? <ComplexOsPage /> : null}
               {tab === "config" ? <ConfigPage /> : null}
               {tab === "help" ? <HelpPage /> : null}

@@ -636,7 +636,14 @@ export async function labLoggerDownloadRing(input?: {
     const { stdout } = await execOnComplexos(
       `if [ -f '${remote}' ]; then wc -c < '${remote}'; echo '###RING###'; cat '${remote}'; else echo '0'; echo '###RING###'; fi`,
       {
-        timeoutMs: 60_000,
+        // Ring is trimmed by retain_hours (default 24h), not by a fixed byte
+        // cap — it can legitimately reach tens of MB. A 60s ceiling was
+        // observed cutting a real 30MB transfer short over slow SD-card /
+        // ProxyJump links; the connection got force-closed mid-`cat` and the
+        // partial bytes were silently accepted below (see integrity check).
+        // Give large rings realistic headroom instead of relying on that
+        // check to fail loudly every time.
+        timeoutMs: 240_000,
         softMarker: "###RING###",
         identityFile: input?.identityFile,
       }
@@ -645,7 +652,27 @@ export async function labLoggerDownloadRing(input?: {
     if (idx < 0) {
       return { ok: false, error: "Не удалось прочитать ring" };
     }
+    // First line is `wc -c` on the remote file, measured *before* transfer.
+    // If the SSH channel is torn down mid-`cat` (timeout, dropped tunnel),
+    // execSsh2/execOpenSshRemoteOnce still resolve "successfully" because the
+    // soft marker had already appeared in the stream — without this check we
+    // silently write a truncated .jsonl that only fails much later, when the
+    // chart's "Импорт лога" tries to parse the cut-off last line.
+    const expectedBytes = Number.parseInt(stdout.slice(0, idx).trim(), 10);
     const body = stdout.slice(idx + "###RING###".length).replace(/^\r?\n/, "");
+    const actualBytes = Buffer.byteLength(body, "utf8");
+    if (
+      Number.isFinite(expectedBytes) &&
+      expectedBytes > 0 &&
+      actualBytes < expectedBytes
+    ) {
+      return {
+        ok: false,
+        error:
+          `Скачивание оборвалось: получено ${actualBytes} из ${expectedBytes} байт ` +
+          `(соединение разорвалось на середине передачи). Повторите «Скачать полный ring» — файл не сохранён.`,
+      };
+    }
     const downloads =
       app.getPath("downloads") || join(homedir(), "Downloads");
     await mkdir(downloads, { recursive: true });
@@ -680,7 +707,7 @@ export async function labLoggerDownloadRing(input?: {
       title: "Бортовой лог",
       message: `Сохранено: ${dest}`,
     });
-    return { ok: true, path: dest, bytes: Buffer.byteLength(body, "utf8") };
+    return { ok: true, path: dest, bytes: actualBytes };
   } catch (e) {
     return { ok: false, error: sshErrMessage(e) };
   }

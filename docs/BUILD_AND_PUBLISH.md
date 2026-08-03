@@ -123,8 +123,8 @@ git push -u origin main
 3. Релизный тег:
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.2.1
+git push origin v0.2.1
 ```
 
 Workflow [`.github/workflows/release.yml`](../.github/workflows/release.yml) соберёт Windows + macOS + Linux артефакты и приложит их к GitHub Release.

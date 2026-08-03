@@ -13,7 +13,7 @@ import {
   type LabEventKind,
 } from "./lab-log.js";
 
-export const LAB_LOGGER_VERSION = "0.1.7";
+export const LAB_LOGGER_VERSION = "0.1.8";
 
 /**
  * SM realtime consumer poll via SSH `curl` to localhost :8765.

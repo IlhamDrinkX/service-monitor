@@ -14,6 +14,7 @@ import { HelpPage } from "./pages/HelpPage";
 import { ModulesPage } from "./pages/ModulesPage";
 import { PeripheralsPage } from "./pages/PeripheralsPage";
 import { LabLoggerPage } from "./pages/LabLoggerPage";
+import { HostPingPage } from "./pages/HostPingPage";
 import { PosPage } from "./pages/PosPage";
 import { SessionPage } from "./pages/SessionPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -42,6 +43,7 @@ type TabId =
   | "peripherals"
   | "pos"
   | "labLogger"
+  | "hostPing"
   | "complexos"
   | "config"
   | "help"
@@ -92,6 +94,13 @@ const TABS: Array<{
     icon: "◍",
     helpId: "nav.labLogger",
     title: "Бортовой lab-logger · complexos",
+  },
+  {
+    id: "hostPing",
+    label: "Доступность",
+    icon: "◌",
+    helpId: "nav.hostPing",
+    title: "Host ping · доступность LAN",
   },
   {
     id: "config",
@@ -252,6 +261,7 @@ function AppShell() {
               {tab === "peripherals" ? <PeripheralsPage /> : null}
               {tab === "pos" ? <PosPage /> : null}
               {tab === "labLogger" ? <LabLoggerPage /> : null}
+              {tab === "hostPing" ? <HostPingPage /> : null}
               {tab === "complexos" ? <ComplexOsPage /> : null}
               {tab === "config" ? <ConfigPage /> : null}
               {tab === "help" ? <HelpPage /> : null}

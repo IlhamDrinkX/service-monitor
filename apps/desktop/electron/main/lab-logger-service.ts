@@ -8,7 +8,15 @@
 import { spawn } from "child_process";
 import { createHash } from "crypto";
 import { existsSync } from "fs";
-import { readFile, writeFile, mkdir } from "fs/promises";
+import {
+  open,
+  readFile,
+  writeFile,
+  mkdir,
+  rename,
+  unlink,
+  stat,
+} from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
 import { app, dialog } from "electron";
@@ -22,13 +30,19 @@ import {
   LAB_LOGGER_REMOTE_BUNDLE_PATH,
   LAB_LOGGER_REMOTE_ROOT,
   LAB_LOGGER_RING_REL,
+  LAB_LOGGER_RING_CHUNK_BYTES,
+  LAB_LOGGER_RING_CHUNK_MARKER,
+  LAB_LOGGER_RING_CHUNK_RETRIES,
   MODULE_SSH_PASSWORD,
+  assertLabLoggerRingDownloadSize,
   buildLabLoggerConfigJson,
   buildLabLoggerDisableAutostartCmd,
   buildLabLoggerEnableAutostartCmd,
   buildLabLoggerEventsCurlCmd,
   buildLabLoggerRemoteUnpackCmd,
   buildLabLoggerRestartCmd,
+  buildLabLoggerRingChunkCmd,
+  buildLabLoggerRingStatCmd,
   buildLabLoggerSnapshotCurlCmd,
   buildLabLoggerStartCmd,
   buildLabLoggerStatusProbeCmd,
@@ -37,9 +51,13 @@ import {
   ensureLabLoggerRingSavePath,
   extractFirstJsonObject,
   isLabLoggerMissingUnitError,
+  labLoggerRingChunkRanges,
   labLoggerRingDownloadFilename,
   parseLabLoggerHealthJson,
+  parseLabLoggerRingChunkStdout,
+  parseLabLoggerRingStatStdout,
   parseLabLoggerStatusOutput,
+  resolveLabLoggerSshTarget,
   stripLabLoggerSshNoise,
   type LabLoggerHealth,
   type LabLoggerStatus,
@@ -215,6 +233,11 @@ function execOpenSshRemoteOnce(input: {
       "UserKnownHostsFile=/dev/null",
       "-o",
       "ConnectTimeout=15",
+      // Keep ProxyJump alive during multi-MB ring chunk transfers.
+      "-o",
+      "ServerAliveInterval=15",
+      "-o",
+      "ServerAliveCountMax=8",
       "-i",
       identityFile,
       "-J",
@@ -322,34 +345,26 @@ async function execOnComplexos(
   const softMarker = opts?.softMarker;
   const stdin = opts?.stdin;
   const session = sshSessionManager.getSnapshot();
-  if (!session.connected) {
-    throw new Error("Нужна активная сессия (вкладка Сессия)");
-  }
-  if (session.mode === "local") {
-    const ip = complexosLanIp();
+  const target = resolveLabLoggerSshTarget(session, complexosLanIp());
+  if (target.mode === "local") {
     return execSsh2({
-      host: ip,
-      port: 22,
+      host: target.host,
+      port: target.port,
       command,
       timeoutMs,
-      label: `${COMPLEX_SSH_USER}@${ip}`,
+      label: `${COMPLEX_SSH_USER}@${target.host}`,
       softMarker,
       stdin,
     });
   }
-  if (session.mode === "remote") {
-    const sshPort = session.sshPort;
-    if (sshPort == null) throw new Error("Remote-сессия без sshPort");
-    return execOpenSshRemote({
-      sshPort,
-      identityFile: opts?.identityFile ?? identityPath(),
-      command,
-      timeoutMs,
-      softMarker,
-      stdin,
-    });
-  }
-  throw new Error("Сессия без режима local/remote");
+  return execOpenSshRemote({
+    sshPort: target.sshPort,
+    identityFile: opts?.identityFile ?? identityPath(),
+    command,
+    timeoutMs,
+    softMarker,
+    stdin,
+  });
 }
 
 async function buildInstallBundle(retainHours: number): Promise<{
@@ -625,54 +640,114 @@ export async function labLoggerFetchEvents(input?: {
   }
 }
 
+const RING_CHUNK_TIMEOUT_MS = 120_000;
+
+async function labLoggerStatRemoteRing(
+  remote: string,
+  identityFile?: string
+): Promise<number> {
+  const { stdout } = await execOnComplexos(buildLabLoggerRingStatCmd(remote), {
+    timeoutMs: 30_000,
+    identityFile,
+  });
+  return parseLabLoggerRingStatStdout(stdout);
+}
+
+async function labLoggerFetchRingChunk(input: {
+  remote: string;
+  offset: number;
+  length: number;
+  identityFile?: string;
+}): Promise<Buffer> {
+  const { remote, offset, length, identityFile } = input;
+  let lastErr = "неизвестная ошибка фрагмента";
+  for (let attempt = 1; attempt <= LAB_LOGGER_RING_CHUNK_RETRIES; attempt++) {
+    try {
+      const { stdout } = await execOnComplexos(
+        buildLabLoggerRingChunkCmd(remote, offset, length),
+        {
+          timeoutMs: RING_CHUNK_TIMEOUT_MS,
+          softMarker: LAB_LOGGER_RING_CHUNK_MARKER,
+          identityFile,
+        }
+      );
+      const parsed = parseLabLoggerRingChunkStdout(stdout, length);
+      if (!parsed.ok) {
+        lastErr = parsed.error;
+      } else {
+        const buf = Buffer.from(parsed.base64, "base64");
+        if (buf.length !== length) {
+          lastErr = `Фрагмент: decoded ${buf.length} ≠ ${length}`;
+        } else {
+          return buf;
+        }
+      }
+    } catch (e) {
+      lastErr = sshErrMessage(e);
+    }
+    if (attempt < LAB_LOGGER_RING_CHUNK_RETRIES) {
+      await delay(400 * attempt);
+    }
+  }
+  throw new Error(
+    `Скачивание оборвалось на offset=${offset} (${length} байт) после ` +
+      `${LAB_LOGGER_RING_CHUNK_RETRIES} попыток: ${lastErr}. ` +
+      `Повторите «Скачать полный ring» — файл не сохранён.`
+  );
+}
+
+/** Progress after each SSH chunk (soft-fail: emit must not abort download). */
+export type LabLoggerDownloadProgress = {
+  bytesReceived: number;
+  bytesTotal: number;
+  percent: number;
+  chunkIndex?: number;
+  chunkCount?: number;
+};
+
+function labLoggerDownloadPercent(
+  bytesReceived: number,
+  bytesTotal: number
+): number {
+  if (
+    !Number.isFinite(bytesReceived) ||
+    !Number.isFinite(bytesTotal) ||
+    bytesTotal <= 0
+  ) {
+    return 0;
+  }
+  return Math.min(
+    100,
+    Math.max(0, Math.round((100 * bytesReceived) / bytesTotal))
+  );
+}
+
+function emitLabLoggerDownloadProgress(
+  onProgress: ((p: LabLoggerDownloadProgress) => void) | undefined,
+  p: LabLoggerDownloadProgress
+): void {
+  if (!onProgress) return;
+  try {
+    onProgress(p);
+  } catch {
+    // Progress UI must never break the download.
+  }
+}
+
+/**
+ * Full ring download: chunked SSH pull (2 MiB) with per-chunk retries.
+ * Writes a `.partial` file and only renames on success; never keeps a truncated save.
+ * Ring growth during transfer is OK (snapshot at start, optional catch-up, size gate).
+ */
 export async function labLoggerDownloadRing(input?: {
   identityFile?: string;
+  onProgress?: (p: LabLoggerDownloadProgress) => void;
 }): Promise<
-  | { ok: true; path: string; bytes: number }
-  | { ok: false; error: string }
+  { ok: true; path: string; bytes: number } | { ok: false; error: string }
 > {
+  const partialPathRef: { path: string | null } = { path: null };
   try {
     const remote = `${LAB_LOGGER_REMOTE_ROOT}/${LAB_LOGGER_RING_REL}`;
-    const { stdout } = await execOnComplexos(
-      `if [ -f '${remote}' ]; then wc -c < '${remote}'; echo '###RING###'; cat '${remote}'; else echo '0'; echo '###RING###'; fi`,
-      {
-        // Ring is trimmed by retain_hours (default 24h), not by a fixed byte
-        // cap — it can legitimately reach tens of MB. A 60s ceiling was
-        // observed cutting a real 30MB transfer short over slow SD-card /
-        // ProxyJump links; the connection got force-closed mid-`cat` and the
-        // partial bytes were silently accepted below (see integrity check).
-        // Give large rings realistic headroom instead of relying on that
-        // check to fail loudly every time.
-        timeoutMs: 240_000,
-        softMarker: "###RING###",
-        identityFile: input?.identityFile,
-      }
-    );
-    const idx = stdout.indexOf("###RING###");
-    if (idx < 0) {
-      return { ok: false, error: "Не удалось прочитать ring" };
-    }
-    // First line is `wc -c` on the remote file, measured *before* transfer.
-    // If the SSH channel is torn down mid-`cat` (timeout, dropped tunnel),
-    // execSsh2/execOpenSshRemoteOnce still resolve "successfully" because the
-    // soft marker had already appeared in the stream — without this check we
-    // silently write a truncated .jsonl that only fails much later, when the
-    // chart's "Импорт лога" tries to parse the cut-off last line.
-    const expectedBytes = Number.parseInt(stdout.slice(0, idx).trim(), 10);
-    const body = stdout.slice(idx + "###RING###".length).replace(/^\r?\n/, "");
-    const actualBytes = Buffer.byteLength(body, "utf8");
-    if (
-      Number.isFinite(expectedBytes) &&
-      expectedBytes > 0 &&
-      actualBytes < expectedBytes
-    ) {
-      return {
-        ok: false,
-        error:
-          `Скачивание оборвалось: получено ${actualBytes} из ${expectedBytes} байт ` +
-          `(соединение разорвалось на середине передачи). Повторите «Скачать полный ring» — файл не сохранён.`,
-      };
-    }
     const downloads =
       app.getPath("downloads") || join(homedir(), "Downloads");
     await mkdir(downloads, { recursive: true });
@@ -680,8 +755,6 @@ export async function labLoggerDownloadRing(input?: {
     const save = await dialog.showSaveDialog({
       title: "Сохранить ring lab-logger (.jsonl)",
       defaultPath: join(downloads, defaultName),
-      // Only .jsonl — Windows often falls back to .txt for unknown filters;
-      // ensureLabLoggerRingSavePath forces the extension on the write path.
       filters: [{ name: "JSON Lines (*.jsonl)", extensions: ["jsonl"] }],
     });
     if (save.canceled || !save.filePath) {
@@ -694,21 +767,132 @@ export async function labLoggerDownloadRing(input?: {
         error: `Внутренняя ошибка расширения: ${dest}`,
       };
     }
-    await writeFile(dest, body, "utf8");
-    if (!body.trim()) {
+
+    const sizeAtStart = await labLoggerStatRemoteRing(
+      remote,
+      input?.identityFile
+    );
+    if (sizeAtStart <= 0) {
       return {
-        ok: true,
-        path: dest,
-        bytes: 0,
+        ok: false,
+        error:
+          "Ring пуст (0 байт). Retention сама по себе не объясняет пустой файл, если комплекс " +
+          "писал события за окно retain_hours — проверьте статус: source=idle / proc / health age / disk=0. " +
+          "Файл не сохранён.",
       };
     }
+
+    const partial = `${dest}.partial`;
+    partialPathRef.path = partial;
+    try {
+      await unlink(partial);
+    } catch {
+      // ignore missing
+    }
+
+    const fh = await open(partial, "w");
+    let localBytes = 0;
+    let sizeAtEnd = sizeAtStart;
+    let bytesTotal = sizeAtStart;
+    try {
+      const ranges = labLoggerRingChunkRanges(
+        sizeAtStart,
+        LAB_LOGGER_RING_CHUNK_BYTES
+      );
+      emitLabLoggerDownloadProgress(input?.onProgress, {
+        bytesReceived: 0,
+        bytesTotal,
+        percent: 0,
+        chunkIndex: 0,
+        chunkCount: ranges.length,
+      });
+      for (let i = 0; i < ranges.length; i++) {
+        const range = ranges[i]!;
+        const buf = await labLoggerFetchRingChunk({
+          remote,
+          offset: range.offset,
+          length: range.length,
+          identityFile: input?.identityFile,
+        });
+        await fh.write(buf);
+        localBytes += buf.length;
+        emitLabLoggerDownloadProgress(input?.onProgress, {
+          bytesReceived: localBytes,
+          bytesTotal,
+          percent: labLoggerDownloadPercent(localBytes, bytesTotal),
+          chunkIndex: i + 1,
+          chunkCount: ranges.length,
+        });
+      }
+
+      // One catch-up pass if the live ring grew while we were pulling.
+      sizeAtEnd = await labLoggerStatRemoteRing(remote, input?.identityFile);
+      if (sizeAtEnd > sizeAtStart) {
+        bytesTotal = sizeAtEnd;
+        const tail = labLoggerRingChunkRanges(
+          sizeAtEnd - sizeAtStart,
+          LAB_LOGGER_RING_CHUNK_BYTES
+        );
+        for (let i = 0; i < tail.length; i++) {
+          const range = tail[i]!;
+          const buf = await labLoggerFetchRingChunk({
+            remote,
+            offset: sizeAtStart + range.offset,
+            length: range.length,
+            identityFile: input?.identityFile,
+          });
+          await fh.write(buf);
+          localBytes += buf.length;
+          emitLabLoggerDownloadProgress(input?.onProgress, {
+            bytesReceived: localBytes,
+            bytesTotal,
+            percent: labLoggerDownloadPercent(localBytes, bytesTotal),
+            chunkIndex: ranges.length + i + 1,
+            chunkCount: ranges.length + tail.length,
+          });
+        }
+      }
+
+      const gate = assertLabLoggerRingDownloadSize({
+        localBytes,
+        sizeAtStart,
+        sizeAtEnd: Math.max(sizeAtStart, sizeAtEnd),
+      });
+      if (!gate.ok) {
+        throw new Error(gate.error);
+      }
+    } finally {
+      await fh.close().catch(() => undefined);
+    }
+
+    try {
+      await unlink(dest);
+    } catch {
+      // dest may not exist yet
+    }
+    await rename(partial, dest);
+    partialPathRef.path = null;
+
+    const st = await stat(dest);
     void dialog.showMessageBox({
       type: "info",
       title: "Бортовой лог",
       message: `Сохранено: ${dest}`,
     });
-    return { ok: true, path: dest, bytes: actualBytes };
+    return {
+      ok: true,
+      path: dest,
+      bytes: st.size,
+    };
   } catch (e) {
+    const partial = partialPathRef.path;
+    if (partial) {
+      try {
+        await unlink(partial);
+      } catch {
+        // ignore
+      }
+    }
     return { ok: false, error: sshErrMessage(e) };
   }
 }

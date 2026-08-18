@@ -35,6 +35,9 @@ import {
   isLabLoggerMissingUnitError,
   isLabLoggerRealtimeReady,
   isSeries4ForLabLogger,
+  isLabLoggerSessionAllowed,
+  LAB_LOGGER_COMPLEXOS_LAN_IP,
+  resolveLabLoggerSshTarget,
   labLoggerRingDownloadFilename,
   maxOnboardRecordTs,
   mergeOnboardLabEvents,
@@ -46,10 +49,24 @@ import {
   onboardValveOverlayKeys,
   parseLabLoggerConfigJson,
   parseLabLoggerHealthJson,
+  parseLabLoggerRingChunkStdout,
+  parseLabLoggerRingDownloadStdout,
   parseLabLoggerStatusOutput,
+  assertLabLoggerRingDownloadSize,
+  buildLabLoggerRingChunkCmd,
+  buildLabLoggerRingStatCmd,
+  labLoggerRingChunkRanges,
   resolveLabLoggerSourceKind,
   stripLabLoggerSshNoise,
+  stripSshNoise,
+  formatSshConnectFailureMessage,
   valvesMapFromOnboardEvents,
+  parseOnboardRingJsonlLine,
+  parseOnboardRingJsonlText,
+  sampleEvenly,
+  downsampleLabEventsForImport,
+  OnboardRingImportAccumulator,
+  LAB_LOGGER_IMPORT_EVENTS_MAX,
 } from "./nats/lab-logger.js";
 import { createLabEvent, type LabEvent } from "./nats/lab-log.js";
 
@@ -70,6 +87,158 @@ describe("lab-logger helpers", () => {
     assert.equal(isSeries4ForLabLogger("3.05"), false);
     assert.equal(isSeries4ForLabLogger(null), false);
     assert.equal(isSeries4ForLabLogger(""), false);
+  });
+
+  it("allows Lab Logger on Local LAN without seriesLabel", () => {
+    assert.equal(
+      isLabLoggerSessionAllowed({
+        connected: true,
+        mode: "local",
+        seriesLabel: null,
+      }),
+      true
+    );
+    assert.equal(
+      isLabLoggerSessionAllowed({
+        connected: false,
+        mode: "local",
+        seriesLabel: null,
+      }),
+      false
+    );
+    assert.equal(
+      isLabLoggerSessionAllowed({
+        connected: true,
+        mode: "remote",
+        seriesLabel: null,
+      }),
+      false
+    );
+    assert.equal(
+      isLabLoggerSessionAllowed({
+        connected: true,
+        mode: "remote",
+        seriesLabel: "4.15",
+      }),
+      true
+    );
+  });
+
+  it("resolves Local vs Remote SSH targets for lab-logger", () => {
+    assert.deepEqual(
+      resolveLabLoggerSshTarget({
+        connected: true,
+        mode: "local",
+        sshPort: null,
+      }),
+      { mode: "local", host: LAB_LOGGER_COMPLEXOS_LAN_IP, port: 22 }
+    );
+    assert.deepEqual(
+      resolveLabLoggerSshTarget({
+        connected: true,
+        mode: "remote",
+        sshPort: 22415,
+      }),
+      { mode: "remote", sshPort: 22415 }
+    );
+    assert.throws(() =>
+      resolveLabLoggerSshTarget({ connected: false, mode: "local" })
+    );
+    assert.throws(() =>
+      resolveLabLoggerSshTarget({
+        connected: true,
+        mode: "remote",
+        sshPort: null,
+      })
+    );
+  });
+
+  it("rejects empty ring download stdout (no silent 0-byte save)", () => {
+    const empty = parseLabLoggerRingDownloadStdout("0\n###RING###\n");
+    assert.equal(empty.ok, false);
+    if (!empty.ok) assert.match(empty.error, /пуст|0 байт/i);
+
+    const missing = parseLabLoggerRingDownloadStdout("no marker here");
+    assert.equal(missing.ok, false);
+
+    const truncated = parseLabLoggerRingDownloadStdout(
+      "20\n###RING###\nshort"
+    );
+    assert.equal(truncated.ok, false);
+    if (!truncated.ok) assert.match(truncated.error, /оборвалось|байт/i);
+
+    const okBody = '{"ts":1}\n';
+    const ok = parseLabLoggerRingDownloadStdout(
+      `${new TextEncoder().encode(okBody).length}\n###RING###\n${okBody}`
+    );
+    assert.equal(ok.ok, true);
+    if (ok.ok) {
+      assert.equal(ok.body, okBody);
+      assert.ok(ok.actualBytes > 0);
+    }
+  });
+
+  it("plans ring chunk ranges and parses base64 chunk stdout", () => {
+    assert.deepEqual(labLoggerRingChunkRanges(0), []);
+    assert.deepEqual(labLoggerRingChunkRanges(5, 2), [
+      { offset: 0, length: 2 },
+      { offset: 2, length: 2 },
+      { offset: 4, length: 1 },
+    ]);
+
+    const cmd = buildLabLoggerRingChunkCmd("/home/pi/sm-lab-logger/data/lab-events.jsonl", 0, 100);
+    assert.match(cmd, /python3 -c/);
+    assert.match(cmd, /###CHUNK###/);
+    assert.match(buildLabLoggerRingStatCmd("/tmp/a'b"), /wc -c/);
+
+    const payload = Buffer.from("hello-ring", "utf8");
+    const b64 = payload.toString("base64");
+    const parsed = parseLabLoggerRingChunkStdout(
+      `${payload.length}\n###CHUNK###\n${b64}\n###END###\n`,
+      payload.length
+    );
+    assert.equal(parsed.ok, true);
+    if (parsed.ok) {
+      assert.equal(parsed.byteLength, payload.length);
+      assert.equal(Buffer.from(parsed.base64, "base64").toString("utf8"), "hello-ring");
+    }
+
+    const short = parseLabLoggerRingChunkStdout(
+      `3\n###CHUNK###\nabc\n###END###\n`,
+      10
+    );
+    assert.equal(short.ok, false);
+  });
+
+  it("accepts ring size when remote grew during download", () => {
+    const empty = assertLabLoggerRingDownloadSize({
+      localBytes: 0,
+      sizeAtStart: 0,
+      sizeAtEnd: 0,
+    });
+    assert.equal(empty.ok, false);
+
+    const truncated = assertLabLoggerRingDownloadSize({
+      localBytes: 100,
+      sizeAtStart: 1000,
+      sizeAtEnd: 1100,
+    });
+    assert.equal(truncated.ok, false);
+    if (!truncated.ok) assert.match(truncated.error, /оборвалось/i);
+
+    const snapshot = assertLabLoggerRingDownloadSize({
+      localBytes: 1000,
+      sizeAtStart: 1000,
+      sizeAtEnd: 1100,
+    });
+    assert.equal(snapshot.ok, true);
+
+    const caughtUp = assertLabLoggerRingDownloadSize({
+      localBytes: 1100,
+      sizeAtStart: 1000,
+      sizeAtEnd: 1100,
+    });
+    assert.equal(caughtUp.ok, true);
   });
 
   it("builds config json with defaults and validates", () => {
@@ -159,6 +328,25 @@ describe("lab-logger helpers", () => {
     assert.match(cleaned, /Unit file does not exist/);
     assert.equal(isLabLoggerMissingUnitError(noisy), true);
     assert.equal(isLabLoggerMissingUnitError("connection refused"), false);
+    assert.equal(stripSshNoise(noisy), cleaned);
+  });
+
+  it("strips session-style known_hosts ([localhost]:22413) and soft-fails empty", () => {
+    const banner =
+      "Warning: Permanently added '[localhost]:22413' (ED25519) to the list of known hosts.";
+    assert.equal(stripSshNoise(banner), "");
+    assert.match(
+      formatSshConnectFailureMessage(banner),
+      /Не удалось поднять SSH-туннель/
+    );
+    assert.match(
+      formatSshConnectFailureMessage("Permission denied (publickey)."),
+      /отказ в доступе/
+    );
+    assert.match(
+      formatSshConnectFailureMessage("ssh: connect to host localhost port 22413: Connection refused"),
+      /соединение отклонено/
+    );
   });
 
   it("strips the OpenSSH PQ 'store now, decrypt later' advisory (field wording)", () => {
@@ -373,10 +561,13 @@ describe("lab-logger helpers", () => {
     assert.ok(
       LAB_LOGGER_PACKAGE_FILES.some((f) => f.startsWith("sm_lab_logger/"))
     );
-    assert.ok(LAB_LOGGER_PACKAGE_FILES.includes("sm_lab_logger/http_api.py"));
-    assert.ok(LAB_LOGGER_PACKAGE_FILES.includes("sm_lab_logger/devices.py"));
-    assert.ok(LAB_LOGGER_PACKAGE_FILES.includes("sm_lab_logger/dx_ui.py"));
-    assert.ok(LAB_LOGGER_PACKAGE_FILES.includes("requirements.txt"));
+      assert.ok(LAB_LOGGER_PACKAGE_FILES.includes("sm_lab_logger/http_api.py"));
+      assert.ok(LAB_LOGGER_PACKAGE_FILES.includes("sm_lab_logger/devices.py"));
+      assert.ok(LAB_LOGGER_PACKAGE_FILES.includes("sm_lab_logger/dx_ui.py"));
+      assert.ok(
+        !LAB_LOGGER_PACKAGE_FILES.includes("sm_lab_logger/host_availability.py")
+      );
+      assert.ok(LAB_LOGGER_PACKAGE_FILES.includes("requirements.txt"));
   });
 
   it("clamps realtime poll interval (SSH-safe bounds)", () => {
@@ -552,21 +743,78 @@ describe("lab-logger helpers", () => {
     assert.ok(formatLabLoggerStatusParts(active).length >= 4);
   });
 
+  it("parses jsonl ring text / lines and downsamples import events", () => {
+    const text = [
+      '{"ts":1000,"kind":"sensor","module":"water","name":"input","value":true}',
+      "",
+      '{"ts":2000,"kind":"valve","module":"milk","name":"inCold","value":false}',
+      '{"ts":3000,"kind":"snapshot","values":{"water.temp":42},"kinds":{"water.temp":"sensor"}}',
+    ].join("\n");
+    const records = parseOnboardRingJsonlText(text);
+    assert.ok(records);
+    assert.equal(records!.length, 3);
+    assert.equal(parseOnboardRingJsonlText('{"kind":"x"}\nnot-json'), null);
+    const emptyLine = parseOnboardRingJsonlLine("");
+    assert.equal(emptyLine.ok, false);
+    assert.ok("empty" in emptyLine && emptyLine.empty);
+    const badLine = parseOnboardRingJsonlLine("nope");
+    assert.equal(badLine.ok, false);
+    assert.ok("invalid" in badLine && badLine.invalid);
+
+    const many: LabEvent[] = [];
+    for (let i = 0; i < 100; i++) {
+      many.push(
+        createLabEvent({
+          at: new Date(1_700_000_000_000 + i * 1000).toISOString(),
+          kind: i % 10 === 0 ? "valve" : "sensor",
+          module: "water",
+          hwid: "t",
+          name: i % 10 === 0 ? "inCold" : "temp",
+          value: i,
+        })
+      );
+    }
+    const capped = downsampleLabEventsForImport(many, 20);
+    assert.ok(capped.length <= 20);
+    assert.ok(capped.length >= 10);
+    // Span coverage: first and last timestamps still present.
+    assert.equal(capped[0]!.at, many[0]!.at);
+    assert.equal(capped[capped.length - 1]!.at, many[many.length - 1]!.at);
+    assert.deepEqual(sampleEvenly([1, 2, 3, 4, 5], 3), [1, 3, 5]);
+
+    const acc = new OnboardRingImportAccumulator(10);
+    for (const line of text.split("\n")) {
+      assert.equal(acc.pushLine(line), true);
+    }
+    const finished = acc.finish();
+    assert.ok(finished.records >= 3);
+    assert.ok(finished.events.length > 0);
+    assert.ok(finished.eventsAfterCap <= 10);
+  });
+
   it("browser-safe export includes path constants used by LabLoggerPage", async () => {
     const browser = await import("./browser.js");
     assert.equal(browser.LAB_LOGGER_REMOTE_ROOT, "/home/pi/sm-lab-logger");
     assert.match(browser.LAB_LOGGER_USER_UNIT_REL, /sm-lab-logger\.service/);
-    assert.equal(
-      typeof browser.formatLabLoggerStatusLine,
-      "function"
-    );
+    assert.equal(typeof browser.formatLabLoggerStatusLine, "function");
     assert.equal(typeof browser.clampLabLoggerPollIntervalMs, "function");
     assert.equal(typeof browser.convertOnboardRecordsToLabEvents, "function");
     assert.equal(typeof browser.ensureLabLoggerRingSavePath, "function");
+    assert.equal(typeof browser.parseOnboardRingJsonlText, "function");
+    assert.equal(typeof browser.downsampleLabEventsForImport, "function");
+    assert.equal(typeof browser.OnboardRingImportAccumulator, "function");
     assert.equal(typeof browser.onboardValveOverlayKeys, "function");
     assert.equal(typeof browser.onboardPumpOverlayHosts, "function");
     assert.equal(typeof browser.onboardHeaterPwmOverlayKeys, "function");
     assert.equal(typeof browser.onboardHeaterIds, "function");
+    assert.equal(typeof browser.isLabLoggerSessionAllowed, "function");
+    assert.equal(typeof browser.resolveLabLoggerSshTarget, "function");
+    assert.equal(typeof browser.parseLabLoggerRingDownloadStdout, "function");
+    assert.equal(browser.LAB_LOGGER_COMPLEXOS_LAN_IP, "192.168.1.43");
     assert.equal(browser.LAB_LOGGER_POLL_INTERVAL_MS_DEFAULT, 1500);
+    assert.equal(browser.LAB_LOGGER_IMPORT_EVENTS_MAX, 60_000);
+    assert.equal(browser.HOST_PING_REMOTE_ROOT, "/home/pi/sm-host-ping");
+    assert.equal(typeof browser.hasHostPingTabletTarget, "function");
+    assert.equal(typeof browser.formatHostPingStatusLine, "function");
   });
 });

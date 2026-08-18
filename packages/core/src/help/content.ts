@@ -65,7 +65,27 @@ export const CONTROL_HELPS: Record<string, ControlHelp> = {
   "nav.labLogger": {
     id: "nav.labLogger",
     title: "Бортовой лог",
-    body: "Установка Python lab-logger на complexos (серия 4.x): /home/pi/sm-lab-logger + systemd --user. Опрос той же картины, что Modules Lab (NATS valves/heaters/pumps + DX :8000 токи/ШИМ). Два режима просмотра: realtime (SSH curl /lab/events → окно графика) и скачивание полного ring (.jsonl). На комплексе — delta+heartbeat. Без плотного Lab dual-poll с ноутбука.",
+    body: "Установка Python lab-logger на complexos (серия 4.x): /home/pi/sm-lab-logger + systemd --user. Работает и в Local LAN (SSH напрямую на pi@192.168.1.43:22), и в Remote (jump + series port) — HTTP логгера остаётся на localhost:8765, SM ходит через SSH curl. Опрос той же картины, что Modules Lab. Realtime / скачивание ring (.jsonl). Доступность хостов (ping) — отдельный пункт «Доступность» / sm-host-ping, не часть бортового лога. На комплексе — delta+heartbeat. Без плотного Lab dual-poll с ноутбука.",
+  },
+  "nav.hostPing": {
+    id: "nav.hostPing",
+    title: "Доступность",
+    body: "Отдельный агент sm-host-ping на complexos (/home/pi/sm-host-ping + systemd --user). Пинг каждые 30 с: LAN (.43/.44/.45/.46/.1 + планшет) и WAN (erp.fibbee.com, 91.206.15.66, 8.8.8.8). В лог — только смены онлайн↔оффлайн, snapshot всех хостов каждые 5 мин. Если WAN недоступен — traceroute в лог. Retention ≥14 дней. IP/MAC планшета — поля на странице перед установкой. После обновления SM — переустановить агент. Не смешивать с «Бортовой лог».",
+  },
+  "hostPing.install": {
+    id: "hostPing.install",
+    title: "Установка Host Ping",
+    body: "Берёт IP и/или MAC планшета из полей на странице (оба пустые — ошибка, без silent install). Пишет config.json, заливает бандл в /home/pi/sm-host-ping, unit sm-host-ping.service. Soft-fail SSH.",
+  },
+  "hostPing.targets": {
+    id: "hostPing.targets",
+    title: "Цели планшета",
+    body: "Редактируемые поля IP и/или MAC на странице. MAC: aa:bb:… / aa-bb-… / 12 hex — нормализуется в aa:bb:…. Только MAC — soft-resolve через ip neigh / arp; при выключенном Wi‑Fi планшета оффлайн — ожидаемо. Модули .43–.46 и router .1 — по умолчанию. Дополнительно ICMP на erp.fibbee.com, 91.206.15.66 и 8.8.8.8 каждые 30 с; при оффлайн — traceroute в лог. Snapshot всех целей каждые 5 мин.",
+  },
+  "hostPing.download": {
+    id: "hostPing.download",
+    title: "Скачать лог доступности",
+    body: "Копирует data/host-ping.jsonl через SSH. Пустой файл — ошибка. Диалог *.jsonl. «Недавние смены» показывают локальное время и онлайн/оффлайн.",
   },
   "labLogger.path": {
     id: "labLogger.path",
@@ -85,7 +105,7 @@ export const CONTROL_HELPS: Record<string, ControlHelp> = {
   "labLogger.status": {
     id: "labLogger.status",
     title: "Статус",
-    body: "Проверяет main.py/пакет, systemctl --user, процесс python и curl /lab/health. source=NATS — живой poll; source=idle — нет nats-py/NATS. «установлен (остановлен)» — файлы есть, сервис не active.",
+    body: "Проверяет main.py/пакет, systemctl --user, процесс python и curl /lab/health. source=NATS — живой poll; source=idle — нет записи в ring. disk=0 / ring=пуст — логгер не писал (не «retention стёр всё за 3 дня»). «установлен (остановлен)» — файлы есть, сервис не active.",
   },
   "labLogger.autostart": {
     id: "labLogger.autostart",
@@ -95,7 +115,7 @@ export const CONTROL_HELPS: Record<string, ControlHelp> = {
   "labLogger.retention": {
     id: "labLogger.retention",
     title: "Retention",
-    body: "Пишет retain_hours в /home/pi/sm-lab-logger/config.json и делает restart unit. Диапазон обычно 1–168 ч.",
+    body: "Пишет retain_hours в config.json и restart unit. Окно — wall-clock: через N часов без новых записей ring опустеет (это ожидаемо). Если комплекс писал последние retain_hours — скачивание не должно быть пустым; пустой download = ошибка или source не писал.",
   },
   "labLogger.view": {
     id: "labLogger.view",
@@ -110,7 +130,7 @@ export const CONTROL_HELPS: Record<string, ControlHelp> = {
   "labLogger.download": {
     id: "labLogger.download",
     title: "Скачать полный ring",
-    body: "Копирует data/lab-events.jsonl с complexos. Диалог только *.jsonl; путь принудительно нормализуется (Windows .txt / без расширения → .jsonl).",
+    body: "Копирует data/lab-events.jsonl с complexos через SSH. Пустой ring (0 байт) — ошибка, файл не сохраняется. Диалог только *.jsonl; путь нормализуется (Windows .txt → .jsonl). Лог доступности хостов — на странице «Доступность».",
   },
   "nav.complexos": {
     id: "nav.complexos",

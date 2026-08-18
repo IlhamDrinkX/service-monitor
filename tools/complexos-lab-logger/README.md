@@ -49,4 +49,4 @@ python tools/complexos-lab-logger/main.py --fake-source --ticks 20 --http-port 8
 
 ## Status
 
-Phase 1.5 tools + Phase 2 SM UI/IPC. Path A onboard web viewer and Path B local console — later. Do not enable dense dual-poll XOR prefs until consumer path is proven.
+Phase 1.5 tools + Phase 2 SM UI/IPC. **Host LAN ping** is a sibling tool: `tools/complexos-host-ping` / SM «Доступность» — not part of this logger. Path A onboard web viewer and Path B local console — later.

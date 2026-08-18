@@ -32,4 +32,5 @@ export * from "./nats/lab-scenarios.js";
 export * from "./nats/dx-ui-stat.js";
 export * from "./nats/lab-telemetry.js";
 export * from "./nats/lab-logger.js";
+export * from "./nats/host-ping.js";
 export * from "./health/health-report.js";

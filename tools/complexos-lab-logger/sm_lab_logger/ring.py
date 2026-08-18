@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import bisect
 import threading
+import time
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
@@ -16,9 +17,32 @@ from .schema import LabEvent, Record, Snapshot, parse_record
 # Concurrent-safe enough for a single process (documented for tests / callers).
 SINGLE_PROCESS = True
 
+# Epoch-ms threshold: unix seconds today are ~1.7e9; ms are ~1.7e12.
+# Scale only second-looking values — not tiny synthetic/relative test clocks.
+_TS_SEC_MIN = 1_000_000_000.0  # ~2001-09 in seconds
+_TS_MS_FLOOR = 1_000_000_000_000.0
+
+
+def normalize_ts_ms(ts: float) -> float:
+    """Coerce onboard timestamps to epoch milliseconds.
+
+    Producers should write ``time.time() * 1000``. If a row was stored in
+    unix seconds (roughly 1e9..1e12), scale it so retain_hours (ms window)
+    does not treat every real sample as ancient and wipe the ring.
+    """
+    if ts != ts:  # NaN
+        return ts
+    if _TS_SEC_MIN <= abs(ts) < _TS_MS_FLOOR:
+        return ts * 1000.0
+    return ts
+
+
+def _is_finite_ts(ts: float) -> bool:
+    return ts == ts and abs(ts) != float("inf")
+
 
 class RingStore:
-    """JSONL ring: append events; trim by retain_hours (vs newest ts) and max_bytes.
+    """JSONL ring: append events; trim by retain_hours (wall-clock) and max_bytes.
 
     Single-process use only — not multi-writer safe. Use an external flock/pidfile
     so only one logger instance owns the data directory.
@@ -137,23 +161,48 @@ class RingStore:
         records.sort(key=lambda r: r.ts)
         return records
 
-    def trim(self) -> None:
-        """Drop lines older than retain_hours (relative to newest ts) and over max_bytes."""
+    def trim(self, now_ms: Optional[float] = None) -> None:
+        """Drop lines older than retain_hours and over max_bytes.
+
+        Retention is wall-clock based (``now_ms - retain_hours``), not only
+        relative to the newest row. That way a dead writer cannot leave a
+        multi-day stale ring forever — after retain_hours with no new samples
+        the file correctly drains. Timestamps are normalized to ms first so a
+        mixed seconds/ms ring cannot prune *everything* as "ancient".
+
+        ``max_bytes`` never deletes the newest remaining record (avoids writing
+        a fully empty file when one line alone exceeds the soft cap).
+        """
         with self._lock:
             records = list(self._cache)
 
         if not records:
             return
 
-        newest_ts = max(r.ts for _, r in records)
         retain_ms = self.retain_hours * 3_600_000.0
-        cutoff = newest_ts - retain_ms
-        kept = [(ln, r) for ln, r in records if r.ts >= cutoff]
+        wall = float(now_ms) if now_ms is not None else time.time() * 1000.0
+        if not _is_finite_ts(wall):
+            wall = time.time() * 1000.0
+
+        finite = [(ln, r) for ln, r in records if _is_finite_ts(r.ts)]
+        if not finite:
+            # Corrupt / NaN-only cache — do not rewrite the file to empty.
+            return
+
+        # Prefer wall clock; if the newest sample is slightly ahead of wall
+        # (clock skew), still use the later of the two so we do not drop the
+        # freshest line as "future then ancient".
+        newest_norm = max(normalize_ts_ms(r.ts) for _, r in finite)
+        ref = max(wall, newest_norm)
+        cutoff = ref - retain_ms
+        kept = [
+            (ln, r) for ln, r in finite if normalize_ts_ms(r.ts) >= cutoff
+        ]
 
         if self.max_bytes is not None and self.max_bytes > 0:
-            # Drop oldest until encoded size fits.
-            while kept:
-                blob = "\n".join(ln for ln, _ in kept) + ("\n" if kept else "")
+            # Drop oldest until encoded size fits — but always keep ≥1 newest.
+            while len(kept) > 1:
+                blob = "\n".join(ln for ln, _ in kept) + "\n"
                 if len(blob.encode("utf-8")) <= self.max_bytes:
                     break
                 kept = kept[1:]

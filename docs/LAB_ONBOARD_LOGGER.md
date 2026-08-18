@@ -30,7 +30,7 @@ Run a lightweight **Python** collector on the **complexos** host (central NATS h
 | **A** | Python onboard collector + **read-only** web viewer / realtime on the complex LAN | Near-term after install path |
 | **B** | Local Linux console **on complexos**, series-**4** only — no fleet/cloud | Later |
 
-**Now:** Service Monitor left-nav **«Бортовой лог»** installs/controls the agent; **realtime** (SSH curl `/lab/events` → chart window, poll ≥1 s / default 1.5 s) and **full ring download**. Path A onboard viewer and Path B console are **not** shipped yet.
+**Now:** Service Monitor left-nav **«Бортовой лог»** installs/controls the agent; **realtime** (SSH curl `/lab/events` → chart window, poll ≥1 s / default 1.5 s) and **full ring download** (chunked ~2 MiB SSH pulls with per-chunk retries — not a single `cat` of the whole file). Path A onboard viewer and Path B console are **not** shipped yet.
 
 **XOR:** when onboard feed is active, disable dense laptop dual-poll (document now; prefs wiring follows).
 
@@ -74,8 +74,11 @@ python tools/complexos-lab-logger/main.py --fake-source --ticks 5 --http-port 87
 | What | Path |
 |------|------|
 | Package + config + data | `/home/pi/sm-lab-logger` |
+| Telemetry ring | `/home/pi/sm-lab-logger/data/lab-events.jsonl` |
 | systemd --user unit | `/home/pi/.config/systemd/user/sm-lab-logger.service` (`~/.config/systemd/user/sm-lab-logger.service`) |
 | HTTP (localhost only) | `http://127.0.0.1:8765/lab/health` |
+
+**Host LAN reachability** is a **sibling** tool — see [`HOST_PING.md`](./HOST_PING.md) (`/home/pi/sm-host-ping`, SM «Доступность»). Not part of lab-logger.
 
 SM install, status, and autostart all use these absolute paths (not a bare `$HOME` that could differ by SSH user). User units need `XDG_RUNTIME_DIR` over SSH; SM sets it and may call `loginctl enable-linger` so the service survives without a GUI session.
 

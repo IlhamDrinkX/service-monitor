@@ -85,8 +85,6 @@ export async function natsDisconnect(): Promise<NatsConnectionInfo> {
 export async function natsConnect(
   serverOverride?: string
 ): Promise<NatsConnectionInfo> {
-  await natsDisconnect();
-
   const session = sshSessionManager.getSnapshot();
   const server =
     serverOverride?.trim() ||
@@ -102,6 +100,14 @@ export async function natsConnect(
       message: "Сначала подключите сессию (вкладка Сессия)",
     };
   }
+
+  // Modules Lab + ComplexOS both auto-connect — don't tear down a healthy
+  // client just to reconnect to the same URL (reconnect storm in the log).
+  if (nc && !nc.isClosed() && currentServer === server) {
+    return getNatsInfo();
+  }
+
+  await natsDisconnect();
 
   console.log("[nats] connect", server);
   try {

@@ -24,6 +24,8 @@ import {
   lanHttpProbeSpecs,
   tunnelHttpProbeSpecs,
   parseSeriesLabel,
+  formatSshConnectFailureMessage,
+  stripSshNoise,
   type ComplexSessionSnapshot,
   type ModuleRole,
   type SessionFailureReason,
@@ -162,10 +164,13 @@ export class ComplexSessionManager {
     });
     this.child = child;
 
-    let stderr = "";
+    let stderrChunks: Buffer[] = [];
     child.stderr.on("data", (buf: Buffer) => {
-      stderr += buf.toString();
-      console.warn("[session] ssh stderr:", buf.toString().trim());
+      stderrChunks.push(buf);
+      const line = buf.toString("utf8").trim();
+      const cleaned = stripSshNoise(line);
+      if (cleaned) console.warn("[session] ssh stderr:", cleaned);
+      else if (line) console.log("[session] ssh stderr (noise):", line);
     });
 
     child.on("exit", (code, signal) => {
@@ -173,22 +178,31 @@ export class ComplexSessionManager {
       if (this.child === child) {
         this.child = null;
         this.stopHeartbeat();
+        const stderr = Buffer.concat(stderrChunks).toString("utf8");
+        const detail = formatSshConnectFailureMessage(
+          stderr,
+          `SSH завершился (code=${code ?? "?"}${signal ? ` signal=${signal}` : ""})`
+        );
         this.snapshot = {
           ...emptySession("process_dead"),
           mode: "remote",
           seriesLabel,
           sshPort,
-          message: `SSH завершился (code=${code ?? "?"}${signal ? ` signal=${signal}` : ""})`,
+          message: detail,
         };
       }
     });
 
+    // Success = local forwards up (dashboard :8080). OpenSSH often prints
+    // "Permanently added … known hosts" / PQ advisories on stderr even when
+    // the tunnel is fine — never treat that noise as the failure reason.
     const ok = await waitForLocalPort(8080, 12_000, () => child.exitCode != null);
     if (!ok || child.exitCode != null) {
       this.killChild();
+      const stderr = Buffer.concat(stderrChunks).toString("utf8");
       return this.fail(
         "connect_failed",
-        stderr.trim() || "Не удалось поднять SSH-туннель (таймаут / ошибка)"
+        formatSshConnectFailureMessage(stderr)
       );
     }
 
@@ -196,7 +210,7 @@ export class ComplexSessionManager {
     await sleepMs(700);
     const { devices, natsOnline, detail } = await probeLanStack("remote", {
       attempts: 3,
-      timeoutMs: 2_800,
+      timeoutMs: 3_500,
     });
     this.remoteProbeFailStreak = natsOnline ? 0 : 1;
     const now = new Date().toISOString();
@@ -370,7 +384,7 @@ export class ComplexSessionManager {
 
     const { devices, natsOnline, detail } = await probeLanStack("remote", {
       attempts: 2,
-      timeoutMs: 2_500,
+      timeoutMs: 3_500,
     });
 
     if (natsOnline) {

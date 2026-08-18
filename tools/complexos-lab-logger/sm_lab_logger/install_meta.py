@@ -96,6 +96,12 @@ def build_default_config(
         "profile": "4.x",
         "fake_source": fake_source,
         "nats_url": "nats://127.0.0.1:4222",
+        "expected": {
+            "milk": "192.168.1.44",
+            "coffee": "192.168.1.45",
+            "water": "192.168.1.46",
+            "complexos": "192.168.1.43",
+        },
     }
 
 

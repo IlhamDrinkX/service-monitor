@@ -36,6 +36,8 @@ import {
 
   isSeries4ForLabLogger,
 
+  isLabLoggerSessionAllowed,
+
   maxOnboardRecordTs,
 
   mergeOnboardLabEvents,
@@ -75,6 +77,12 @@ import {
   openLabChartLogViewer,
 
 } from "../components/ModulesLabCharts";
+
+import {
+
+  formatLabLoggerDownloadProgressLabel,
+
+} from "../lib/lab-logger-download-progress";
 
 import { useComplexSession } from "../state/useComplexSession";
 
@@ -122,11 +130,24 @@ export function LabLoggerPage() {
 
   const seriesOk = isSeries4ForLabLogger(session.seriesLabel);
 
-  const controlsDisabled = !live || !seriesOk;
+  // Local LAN connect leaves seriesLabel=null — still allow Lab Logger (DrinkX 4.x).
+  const controlsDisabled = !isLabLoggerSessionAllowed(session);
 
 
 
   const [busy, setBusy] = useState<string | null>(null);
+
+  const [downloadProgress, setDownloadProgress] = useState<{
+
+    bytesReceived: number;
+
+    bytesTotal: number;
+
+    percent: number;
+
+    label: string;
+
+  } | null>(null);
 
   const [status, setStatus] = useState<LabLoggerStatus | null>(null);
 
@@ -764,7 +785,49 @@ export function LabLoggerPage() {
 
     }
 
+    if (busy === "download") return;
+
     setBusy("download");
+
+    setDownloadProgress({
+
+      bytesReceived: 0,
+
+      bytesTotal: 0,
+
+      percent: 0,
+
+      label: "Подготовка…",
+
+    });
+
+    const unsub =
+
+      typeof window.desktop.onLabLoggerDownloadProgress === "function"
+
+        ? window.desktop.onLabLoggerDownloadProgress((p) => {
+
+            setDownloadProgress({
+
+              bytesReceived: p.bytesReceived,
+
+              bytesTotal: p.bytesTotal,
+
+              percent: p.percent,
+
+              label: formatLabLoggerDownloadProgressLabel(
+
+                p.bytesReceived,
+
+                p.bytesTotal
+
+              ),
+
+            });
+
+          })
+
+        : undefined;
 
     try {
 
@@ -786,11 +849,23 @@ export function LabLoggerPage() {
 
     } finally {
 
+      try {
+
+        unsub?.();
+
+      } catch {
+
+        // ignore
+
+      }
+
+      setDownloadProgress(null);
+
       setBusy(null);
 
     }
 
-  }, [controlsDisabled, pushLog, status]);
+  }, [busy, controlsDisabled, pushLog, status]);
 
 
 
@@ -854,15 +929,25 @@ export function LabLoggerPage() {
 
           </span>
 
-          <span className={`badge${seriesOk ? " on" : " danger"}`}>
+          <span className={`badge${live && session.mode === "local" ? " on" : ""}`}>
 
-            {session.seriesLabel
+            {session.mode === "local"
+              ? "Local LAN → pi@192.168.1.43"
+              : session.mode === "remote"
+                ? "Remote SSH"
+                : "режим?"}
 
-              ? `серия ${session.seriesLabel}`
+          </span>
 
-              : "серия не задана"}
+          <span className={`badge${seriesOk || session.mode === "local" ? " on" : " danger"}`}>
 
-            {seriesOk ? "" : " · нужен 4.x"}
+            {session.mode === "local" && !session.seriesLabel
+              ? "серия 4.x (Local)"
+              : session.seriesLabel
+                ? `серия ${session.seriesLabel}`
+                : "серия не задана"}
+
+            {seriesOk || session.mode === "local" ? "" : " · нужен 4.x"}
 
           </span>
 
@@ -1218,9 +1303,11 @@ export function LabLoggerPage() {
 
         <p className="muted" style={{ marginTop: 0 }}>
 
-          Основное действие — скачать ring jsonl. Превью snapshot/events —
+          Основное действие — скачать ring jsonl (телеметрия NATS/DX).
 
-          для быстрой проверки HTTP.
+          Доступность хостов — отдельная страница «Доступность». Превью
+
+          snapshot/events — для быстрой проверки HTTP.
 
         </p>
 
@@ -1244,7 +1331,7 @@ export function LabLoggerPage() {
 
           >
 
-            {busy === "download" ? "…" : "Скачать полный ring"}
+            {busy === "download" ? "Скачивание…" : "Скачать полный ring"}
 
           </ActionButton>
 
@@ -1263,6 +1350,68 @@ export function LabLoggerPage() {
           </ActionButton>
 
         </div>
+
+        {downloadProgress ? (
+
+          <div style={{ marginTop: 12, maxWidth: 420 }}>
+
+            <div
+
+              className="muted"
+
+              style={{ fontSize: "0.9rem", marginBottom: 6 }}
+
+            >
+
+              {downloadProgress.label}
+
+            </div>
+
+            <div
+
+              role="progressbar"
+
+              aria-valuemin={0}
+
+              aria-valuemax={100}
+
+              aria-valuenow={downloadProgress.percent}
+
+              style={{
+
+                height: 8,
+
+                borderRadius: 4,
+
+                background: "var(--accent-soft)",
+
+                overflow: "hidden",
+
+              }}
+
+            >
+
+              <div
+
+                style={{
+
+                  width: `${Math.min(100, Math.max(0, downloadProgress.percent))}%`,
+
+                  height: "100%",
+
+                  background: "var(--accent)",
+
+                  transition: "width 0.15s ease-out",
+
+                }}
+
+              />
+
+            </div>
+
+          </div>
+
+        ) : null}
 
         {live && seriesOk && status?.installed !== true ? (
 

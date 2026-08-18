@@ -1,0 +1,14 @@
+[Unit]
+Description=Service Monitor host ping (LAN reachability)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/sm-host-ping
+ExecStart=/usr/bin/python3 /home/pi/sm-host-ping/main.py --config /home/pi/sm-host-ping/config.json
+Restart=always
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=default.target

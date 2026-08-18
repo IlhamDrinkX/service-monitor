@@ -30,7 +30,6 @@ class TestConfigValidation(unittest.TestCase):
         with self.assertRaises(ConfigError):
             load_config(argv=["--retain-hours", "-1"])
 
-
 class TestConfigCliOverrides(unittest.TestCase):
     def test_cli_overrides_defaults(self) -> None:
         cfg = load_config(argv=["--retain-hours", "12", "--interval-ms", "100"])

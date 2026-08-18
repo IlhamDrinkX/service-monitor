@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """complexos Lab onboard logger — CLI (Phase 1.6+).
 
-FakeSource (--fake-source) for local demo; default tries NatsSource (optional nats-py)
+FakeSource (--fake-source) for local demo; default tries NatsSource
 on nats://127.0.0.1:4222 with Modules-parity valves/heaters/pumps + DX :8000.
 Soft-fail ticks; never brick complexos. See docs/LAB_ONBOARD_LOGGER.md.
+
+Host LAN reachability is a **sibling** tool: tools/complexos-host-ping
+(sm-host-ping) — not part of this logger.
 """
 
 from __future__ import annotations
@@ -96,10 +99,6 @@ class _Runtime:
         return Snapshot(ts=ts, values=state, kinds=self.engine.kinds()).to_dict()
 
     def events(self, from_ts: Optional[float], to_ts: Optional[float]) -> List[Dict[str, Any]]:
-        # records_since (not events_since!) — must include Snapshot heartbeats
-        # or a series that stops changing silently vanishes from SM's
-        # realtime chart forever once its render-side hold window elapses.
-        # See RingStore.records_since docstring for the full incident.
         start = from_ts if from_ts is not None else 0.0
         recs = self.ring.records_since(start)
         if to_ts is not None:
@@ -136,28 +135,31 @@ class _CyclingFakeSource:
         return frame
 
 
-def _run_poll_loop(rt: _Runtime, source, http: Optional[LabHttpServer], cfg: LoggerConfig) -> int:
+def _run_poll_loop(
+    rt: _Runtime,
+    source,
+    http: Optional[LabHttpServer],
+    cfg: LoggerConfig,
+) -> int:
     try:
         while True:
             now_ms = time.time() * 1000.0
             written = run_tick(source, rt.engine, rt.ring, rt.watchdog, now_ms=now_ms)
             if written:
                 rt.last_sample_ms = now_ms
-                rt.ring.trim()
-            # Recompute topology warnings from what this source actually saw
-            # respond this tick (NatsSource.last_reachable) instead of the old
-            # static check_topology({}, ...) call, which unconditionally
-            # reported every configured role as "missing" forever regardless
-            # of real state — exactly the noise seen in /lab/health in the
-            # field. Sources without last_reachable (FakeSource) keep no
-            # warnings rather than a fabricated one.
+            rt.ring.trim(now_ms=now_ms)
             reachable = getattr(source, "last_reachable", None)
             if reachable is not None:
                 discovered = {
                     role: ip for role, ip in cfg.expected.items() if role in reachable
                 }
+                topo_expected = {
+                    k: v
+                    for k, v in cfg.expected.items()
+                    if k in ("milk", "coffee", "water")
+                }
                 rt.topology_warnings = list(
-                    check_topology(discovered, expected=cfg.expected).warnings
+                    check_topology(discovered, expected=topo_expected or cfg.expected).warnings
                 )
             rt.tick_count += 1
             if cfg.ticks and rt.tick_count >= cfg.ticks:
@@ -212,7 +214,7 @@ def main(argv: list[str] | None = None) -> int:
             values={"_heartbeat": 1, "profile": cfg.profile},
         )
         store.append(snap)
-        store.trim()
+        store.trim(now_ms=snap.ts)
         print(f"dry-run: wrote heartbeat -> {ring_path}", flush=True)
         return 0
 
@@ -224,6 +226,7 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
     ring = RingStore(ring_path, retain_hours=cfg.retain_hours, max_bytes=cfg.max_bytes)
+
     source_kind = "idle"
     source = None
 
@@ -237,10 +240,6 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
     else:
-        # MiniNatsClient is stdlib-only — no pip/internet dependency, so this
-        # never raises ImportError. Connection itself is lazy (first poll());
-        # a dead NATS hub surfaces as ordinary poll failures/backoff, handled
-        # by run_tick + Watchdog like any other soft-fail, not as "idle".
         source = NatsSource(
             url=cfg.nats_url,
             dx_urls=_dx_urls_from_expected(cfg.expected),
@@ -254,8 +253,6 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     rt = _Runtime(cfg, ring, lock, source_kind=source_kind)
-    # Placeholder until the first tick reports real reachability below —
-    # do NOT claim "missing" for anything before we have actually polled.
     rt.topology_warnings = []
 
     http: Optional[LabHttpServer] = None
@@ -271,7 +268,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"http: http://127.0.0.1:{http.port}/lab/health", flush=True)
 
     if source is None:
-        # Idle: hold lock + HTTP; no synthetic valve toggles.
         try:
             while True:
                 time.sleep(max(cfg.interval_ms, 1000) / 1000.0)

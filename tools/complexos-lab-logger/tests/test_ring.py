@@ -81,25 +81,71 @@ class TestRingRecordsSinceIncludesHeartbeat(unittest.TestCase):
 class TestRingTrimRetainHours(unittest.TestCase):
     def test_trim_drops_older_than_retain_hours(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            # retain 1 hour = 3600_000 ms if ts is epoch-ms; use seconds for simplicity
-            # RingStore treats ts as epoch milliseconds (SM chart style) or seconds —
-            # API: retain_hours relative to newest event ts.
+            # RingStore timestamps are epoch-ms; retain window is wall-clock.
             store = RingStore(
                 Path(tmp) / "lab-events.jsonl",
                 retain_hours=1.0,
             )
-            # newest at T; older than 1h must drop
-            t_now = 10_000_000.0  # ms
+            t_now = 10_000_000.0  # synthetic ms (below unix-sec band)
             hour_ms = 3_600_000.0
             store.append(_ev(t_now - hour_ms - 1, "old"))
             store.append(_ev(t_now - hour_ms // 2, "mid"))
             store.append(_ev(t_now, "new"))
-            store.trim()
+            store.trim(now_ms=t_now)
             all_ev = store.events_since(0)
             names = [e.name for e in all_ev]
             self.assertNotIn("old", names)
             self.assertIn("mid", names)
             self.assertIn("new", names)
+
+    def test_trim_wall_clock_empties_when_no_recent_writes(self) -> None:
+        """retain=48h + T+3d with no new samples → empty (not a prune bug)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = RingStore(
+                Path(tmp) / "lab-events.jsonl",
+                retain_hours=48.0,
+            )
+            t0 = 1_720_000_000_000.0  # real-looking epoch ms
+            store.append(_ev(t0, "a"))
+            store.append(_ev(t0 + 60_000, "b"))
+            three_days_later = t0 + 3 * 24 * 3_600_000.0
+            store.trim(now_ms=three_days_later)
+            self.assertEqual(store.events_since(0), [])
+            self.assertEqual(Path(tmp, "lab-events.jsonl").read_text(encoding="utf-8"), "")
+
+    def test_trim_keeps_last_48h_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = RingStore(
+                Path(tmp) / "lab-events.jsonl",
+                retain_hours=48.0,
+            )
+            t_now = 1_720_000_000_000.0
+            day_ms = 24 * 3_600_000.0
+            store.append(_ev(t_now - 3 * day_ms, "old3d"))
+            store.append(_ev(t_now - 1 * day_ms, "mid1d"))
+            store.append(_ev(t_now - 1_000, "fresh"))
+            store.trim(now_ms=t_now)
+            names = [e.name for e in store.events_since(0)]
+            self.assertNotIn("old3d", names)
+            self.assertIn("mid1d", names)
+            self.assertIn("fresh", names)
+
+    def test_trim_normalizes_unix_seconds_so_mixed_units_do_not_wipe(self) -> None:
+        """One ms heartbeat must not make every seconds-row look ancient."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = RingStore(
+                Path(tmp) / "lab-events.jsonl",
+                retain_hours=1.0,
+            )
+            # Seconds-scale samples around "now", plus one already-ms twin.
+            sec_now = 1_720_000_000.0
+            store.append(_ev(sec_now - 100, "sec_oldish"))
+            store.append(_ev(sec_now, "sec_new"))
+            store.append(_ev(sec_now * 1000.0, "ms_new"))
+            store.trim(now_ms=sec_now * 1000.0)
+            names = [e.name for e in store.events_since(0)]
+            self.assertIn("sec_new", names)
+            self.assertIn("ms_new", names)
 
 
 class TestRingSizeCap(unittest.TestCase):
@@ -110,17 +156,25 @@ class TestRingSizeCap(unittest.TestCase):
             store = RingStore(path, retain_hours=24.0, max_bytes=180)
             for i in range(20):
                 store.append(_ev(1000.0 + i, f"n{i}", value=i))
-            store.trim()
+            store.trim(now_ms=2000.0)
             remaining = store.events_since(0)
             self.assertGreater(len(remaining), 0)
             self.assertLess(len(remaining), 20)
-            # chronological: first remaining is newer than dropped
-            self.assertEqual(remaining[0].name, remaining[0].name)
             names = [e.name for e in remaining]
             self.assertEqual(names, sorted(names, key=lambda n: int(n[1:])))
-            self.assertTrue(path.stat().st_size <= 180 + 200)  # soft: after rewrite within bound roughly
-            # oldest indices gone
+            self.assertTrue(path.stat().st_size <= 180 + 200)
             self.assertNotIn("n0", names)
+
+    def test_size_cap_never_deletes_last_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "lab-events.jsonl"
+            store = RingStore(path, retain_hours=24.0, max_bytes=1)
+            store.append(_ev(1000.0, "only", value=1))
+            store.trim(now_ms=1000.0)
+            remaining = store.events_since(0)
+            self.assertEqual(len(remaining), 1)
+            self.assertEqual(remaining[0].name, "only")
+            self.assertGreater(path.stat().st_size, 0)
 
 
 class TestRingSingleProcessNote(unittest.TestCase):

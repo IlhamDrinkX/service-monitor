@@ -6,6 +6,7 @@
 import { MODULE_VALVES, type DrinkxHost } from "./module-devices.js";
 import {
   createLabEvent,
+  LAB_EVENTS_CHART_SYNC_MAX,
   LAB_EVENTS_CHART_WINDOW_MAX,
   parseSeriesKey,
   trimLabEvents,
@@ -13,7 +14,13 @@ import {
   type LabEventKind,
 } from "./lab-log.js";
 
-export const LAB_LOGGER_VERSION = "0.1.8";
+/**
+ * Cap for «Импорт лога» of a full onboard ring (.jsonl). Matches chart IPC
+ * sync size so a 30–40 MB ring does not freeze the renderer / blow IPC.
+ */
+export const LAB_LOGGER_IMPORT_EVENTS_MAX = LAB_EVENTS_CHART_SYNC_MAX;
+
+export const LAB_LOGGER_VERSION = "0.2.0";
 
 /**
  * SM realtime consumer poll via SSH `curl` to localhost :8765.
@@ -54,6 +61,9 @@ export const LAB_LOGGER_HTTP_PORT = 8765;
 
 export const LAB_LOGGER_RING_REL = "data/lab-events.jsonl";
 
+/** @deprecated Host ping is tools/complexos-host-ping — kept for old status parsers. */
+export const LAB_LOGGER_AVAILABILITY_REL = "data/host-availability.jsonl";
+
 export const LAB_LOGGER_CONFIG_REL = "config.json";
 
 /** Relative paths packaged from tools/complexos-lab-logger. */
@@ -84,6 +94,7 @@ export type LabLoggerConfigJson = {
   data_dir: string;
   profile: string;
   fake_source?: boolean;
+  expected?: Record<string, string>;
 };
 
 /** Telemetry backend reported by onboard `/lab/health`. */
@@ -95,6 +106,8 @@ export type LabLoggerHealth = {
   lockHeld: boolean;
   topologyWarnings: string[];
   diskBytes: number;
+  /** @deprecated Always 0 — host ping is a sibling tool. */
+  availabilityDiskBytes: number;
   ticks: number;
   watchdogBackoff: boolean;
   dxAllowed: boolean;
@@ -135,6 +148,55 @@ export function isSeries4ForLabLogger(
   return Number(m[1]) >= 4;
 }
 
+/**
+ * Lab Logger controls: Remote requires series 4.x; Local LAN DrinkX sessions
+ * do not collect seriesLabel on connect — allow when Local + connected.
+ */
+export function isLabLoggerSessionAllowed(session: {
+  connected?: boolean | null;
+  mode?: string | null;
+  seriesLabel?: string | null;
+}): boolean {
+  if (session.connected !== true) return false;
+  if (session.mode === "local") return true;
+  return isSeries4ForLabLogger(session.seriesLabel);
+}
+
+/** Default complexos LAN IP (DrinkX map). */
+export const LAB_LOGGER_COMPLEXOS_LAN_IP = "192.168.1.43";
+
+export type LabLoggerSshTarget =
+  | { mode: "local"; host: string; port: number }
+  | { mode: "remote"; sshPort: number };
+
+/**
+ * SSH target for lab-logger install/status/curl/download.
+ * Local: direct pi@192.168.1.43:22 (no jump). Remote: OpenSSH via jump + series port.
+ */
+export function resolveLabLoggerSshTarget(
+  session: {
+    connected?: boolean | null;
+    mode?: string | null;
+    sshPort?: number | null;
+  },
+  complexosLanIp: string = LAB_LOGGER_COMPLEXOS_LAN_IP
+): LabLoggerSshTarget {
+  if (session.connected !== true) {
+    throw new Error("Нужна активная сессия (вкладка Сессия)");
+  }
+  if (session.mode === "local") {
+    return { mode: "local", host: complexosLanIp, port: 22 };
+  }
+  if (session.mode === "remote") {
+    const sshPort = session.sshPort;
+    if (sshPort == null || !Number.isFinite(sshPort)) {
+      throw new Error("Remote-сессия без sshPort");
+    }
+    return { mode: "remote", sshPort: Number(sshPort) };
+  }
+  throw new Error("Сессия без режима local/remote");
+}
+
 export function buildLabLoggerConfigJson(
   opts: Partial<LabLoggerConfigJson> = {}
 ): string {
@@ -147,6 +209,12 @@ export function buildLabLoggerConfigJson(
     profile: opts.profile ?? "4.x",
     // Prefer real NATS (Phase 1.6); FakeSource only via explicit --fake-source.
     fake_source: opts.fake_source ?? false,
+    expected: opts.expected ?? {
+      milk: "192.168.1.44",
+      coffee: "192.168.1.45",
+      water: "192.168.1.46",
+      complexos: "192.168.1.43",
+    },
   };
   if (cfg.retain_hours <= 0) {
     throw new Error("retain_hours must be > 0");
@@ -488,9 +556,230 @@ export function ensureLabLoggerRingSavePath(
 }
 
 /**
- * Strip OpenSSH client noise (PQ KEX, known_hosts) from user-facing errors.
+ * Parse SSH stdout from the ring download probe (`wc -c` + ###RING### + body).
+ * Empty / missing ring → error (do not treat as a successful 0-byte save).
+ * Kept for single-shot / legacy callers; full ring download uses chunked helpers below.
  */
-export function stripLabLoggerSshNoise(text: string): string {
+export function parseLabLoggerRingDownloadStdout(
+  stdout: string
+):
+  | { ok: true; body: string; expectedBytes: number; actualBytes: number }
+  | { ok: false; error: string } {
+  const marker = "###RING###";
+  const idx = stdout.indexOf(marker);
+  if (idx < 0) {
+    return { ok: false, error: "Не удалось прочитать ring" };
+  }
+  const expectedBytes = Number.parseInt(stdout.slice(0, idx).trim(), 10);
+  const body = stdout.slice(idx + marker.length).replace(/^\r?\n/, "");
+  const actualBytes = new TextEncoder().encode(body).length;
+
+  if (
+    Number.isFinite(expectedBytes) &&
+    expectedBytes > 0 &&
+    actualBytes < expectedBytes
+  ) {
+    return {
+      ok: false,
+      error:
+        `Скачивание оборвалось: получено ${actualBytes} из ${expectedBytes} байт ` +
+        `(соединение разорвалось на середине передачи). Повторите «Скачать полный ring» — файл не сохранён.`,
+    };
+  }
+
+  if (!body.trim()) {
+    return {
+      ok: false,
+      error:
+        "Ring пуст (0 байт). Retention сама по себе не объясняет пустой файл, если комплекс " +
+        "писал события за окно retain_hours — проверьте статус: source=idle / proc / health age / disk=0. " +
+        "Файл не сохранён.",
+    };
+  }
+
+  return {
+    ok: true,
+    body,
+    expectedBytes: Number.isFinite(expectedBytes) ? expectedBytes : actualBytes,
+    actualBytes,
+  };
+}
+
+/** Wire chunk size for full ring pull over SSH/ProxyJump (~2 MiB). */
+export const LAB_LOGGER_RING_CHUNK_BYTES = 2 * 1024 * 1024;
+
+/** Retries per failed chunk before aborting the whole download. */
+export const LAB_LOGGER_RING_CHUNK_RETRIES = 3;
+
+/** Soft markers for chunked ring transfer (base64 payload). */
+export const LAB_LOGGER_RING_CHUNK_MARKER = "###CHUNK###";
+export const LAB_LOGGER_RING_CHUNK_END = "###END###";
+
+export type LabLoggerRingChunkRange = { offset: number; length: number };
+
+/** Split a byte length into contiguous chunk ranges (last may be shorter). */
+export function labLoggerRingChunkRanges(
+  totalBytes: number,
+  chunkBytes: number = LAB_LOGGER_RING_CHUNK_BYTES
+): LabLoggerRingChunkRange[] {
+  if (
+    !Number.isFinite(totalBytes) ||
+    totalBytes <= 0 ||
+    !Number.isFinite(chunkBytes) ||
+    chunkBytes <= 0
+  ) {
+    return [];
+  }
+  const total = Math.floor(totalBytes);
+  const size = Math.floor(chunkBytes);
+  const ranges: LabLoggerRingChunkRange[] = [];
+  for (let offset = 0; offset < total; offset += size) {
+    ranges.push({ offset, length: Math.min(size, total - offset) });
+  }
+  return ranges;
+}
+
+/** Remote `wc -c` of the ring file (0 if missing). */
+export function buildLabLoggerRingStatCmd(remotePath: string): string {
+  const q = remotePath.replace(/'/g, `'\\''`);
+  return `if [ -f '${q}' ]; then wc -c < '${q}'; else echo 0; fi`;
+}
+
+/**
+ * Seek+read one byte range via python3, emit length + base64 (SSH-safe).
+ * Avoids single-shot `cat` of a 30–70 MB ring over a flaky ProxyJump.
+ */
+export function buildLabLoggerRingChunkCmd(
+  remotePath: string,
+  offset: number,
+  length: number
+): string {
+  const off = Math.max(0, Math.floor(offset));
+  const ln = Math.max(0, Math.floor(length));
+  const py = [
+    "import base64,sys",
+    `p=${JSON.stringify(remotePath)};o=${off};n=${ln}`,
+    'f=open(p,"rb");f.seek(o);d=f.read(n);f.close()',
+    `sys.stdout.write(str(len(d))+"\\n${LAB_LOGGER_RING_CHUNK_MARKER}\\n")`,
+    'sys.stdout.write(base64.b64encode(d).decode("ascii")+"\\n")',
+    `sys.stdout.write("${LAB_LOGGER_RING_CHUNK_END}\\n")`,
+  ].join(";");
+  return `python3 -c ${JSON.stringify(py)}`;
+}
+
+export function parseLabLoggerRingStatStdout(stdout: string): number {
+  const n = Number.parseInt(String(stdout ?? "").trim().split(/\s+/)[0] ?? "", 10);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+/**
+ * Parse one chunk response: `<len>\n###CHUNK###\n<base64>\n###END###`.
+ * Returns base64 (caller decodes) so this stays Buffer-free for browser builds.
+ */
+export function parseLabLoggerRingChunkStdout(
+  stdout: string,
+  expectedLength: number
+):
+  | { ok: true; byteLength: number; base64: string }
+  | { ok: false; error: string } {
+  const marker = LAB_LOGGER_RING_CHUNK_MARKER;
+  const end = LAB_LOGGER_RING_CHUNK_END;
+  const idx = stdout.indexOf(marker);
+  if (idx < 0) {
+    return { ok: false, error: "Не удалось прочитать фрагмент ring (нет маркера)" };
+  }
+  const reported = Number.parseInt(stdout.slice(0, idx).trim(), 10);
+  const after = stdout.slice(idx + marker.length).replace(/^\r?\n/, "");
+  const endIdx = after.indexOf(end);
+  const b64raw = (endIdx >= 0 ? after.slice(0, endIdx) : after).trim();
+  const b64 = b64raw.replace(/\s+/g, "");
+  if (!b64 && expectedLength > 0) {
+    return { ok: false, error: "Пустой фрагмент ring" };
+  }
+  const pad = b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0;
+  const decodedLen =
+    b64.length === 0 ? 0 : Math.floor((b64.length * 3) / 4) - pad;
+
+  if (Number.isFinite(reported) && reported !== decodedLen) {
+    return {
+      ok: false,
+      error: `Фрагмент оборвался: len=${reported}, base64≈${decodedLen}`,
+    };
+  }
+
+  if (expectedLength > 0 && decodedLen !== expectedLength) {
+    return {
+      ok: false,
+      error: `Фрагмент короче/длиннее ожидаемого: ${decodedLen} из ${expectedLength}`,
+    };
+  }
+
+  return { ok: true, byteLength: decodedLen, base64: b64 };
+}
+
+/**
+ * Final size gate for a chunked ring pull.
+ * Ring may grow while downloading: accept local === sizeAtStart (snapshot) or
+ * local === sizeAtEnd (caught up). Never accept a truncated file.
+ */
+export function assertLabLoggerRingDownloadSize(input: {
+  localBytes: number;
+  sizeAtStart: number;
+  sizeAtEnd: number;
+}): { ok: true } | { ok: false; error: string } {
+  const local = Math.max(0, Math.floor(input.localBytes));
+  const start = Math.max(0, Math.floor(input.sizeAtStart));
+  const end = Math.max(0, Math.floor(input.sizeAtEnd));
+  const minOk = start;
+  const maxOk = Math.max(start, end);
+
+  if (minOk <= 0) {
+    return {
+      ok: false,
+      error:
+        "Ring пуст (0 байт). Retention сама по себе не объясняет пустой файл, если комплекс " +
+        "писал события за окно retain_hours — проверьте статус: source=idle / proc / health age / disk=0. " +
+        "Файл не сохранён.",
+    };
+  }
+
+  if (local < minOk) {
+    return {
+      ok: false,
+      error:
+        `Скачивание оборвалось: получено ${local} из ${minOk} байт ` +
+        `(соединение разорвалось на середине передачи). Повторите «Скачать полный ring» — файл не сохранён.`,
+    };
+  }
+
+  // Snapshot at click time, or full catch-up after re-stat — both OK.
+  // Do not fail solely because the live ring grew past sizeAtStart.
+  if (local === start || local === end) {
+    return { ok: true };
+  }
+
+  if (local > maxOk) {
+    return {
+      ok: false,
+      error:
+        `Размер локального файла (${local}) больше remote (${maxOk}). Файл не сохранён.`,
+    };
+  }
+
+  return {
+    ok: false,
+    error:
+      `Скачивание неполное: локально ${local} байт, remote был ${start}…${end}. ` +
+      `Повторите «Скачать полный ring» — файл не сохранён.`,
+  };
+}
+
+/**
+ * Strip OpenSSH client noise (PQ KEX, known_hosts) from user-facing errors.
+ * Shared by lab-logger SSH and Remote session connect — both surface stderr
+ * and must not treat banners as failure text.
+ */
+export function stripSshNoise(text: string): string {
   if (!text) return "";
   const cleaned = text
     .split(/\r?\n/)
@@ -519,9 +808,46 @@ export function stripLabLoggerSshNoise(text: string): string {
   return cleaned;
 }
 
+/** @deprecated Prefer {@link stripSshNoise} — same filter. */
+export const stripLabLoggerSshNoise = stripSshNoise;
+
+const SSH_CONNECT_FALLBACK_RU =
+  "Не удалось поднять SSH-туннель (таймаут / ошибка)";
+
+/**
+ * User-facing Remote-connect failure: drop OpenSSH noise, soft-map common
+ * failures to RU. Empty after strip → generic tunnel message (not raw banners).
+ */
+export function formatSshConnectFailureMessage(
+  stderr: string,
+  fallback: string = SSH_CONNECT_FALLBACK_RU
+): string {
+  const cleaned = stripSshNoise(stderr);
+  if (!cleaned) return fallback;
+  if (/permission denied|authentication (failed|refused)|publickey/i.test(cleaned)) {
+    return "SSH: отказ в доступе (ключ или auth). Проверьте id_ed25519 и доступ на ERP/комплекс.";
+  }
+  if (/connection refused/i.test(cleaned)) {
+    return "SSH: соединение отклонено. Проверьте серию (порт) и что комплекс онлайн на ERP.";
+  }
+  if (/connection timed? ?out|operation timed out|timed out while/i.test(cleaned)) {
+    return "SSH: таймаут подключения. Проверьте VPN/ERP и серию комплекса.";
+  }
+  if (/could not resolve|name or service not known|no such host/i.test(cleaned)) {
+    return "SSH: не удалось разрешить хост ERP. Проверьте сеть и DNS.";
+  }
+  if (/network is unreachable|no route to host/i.test(cleaned)) {
+    return "SSH: сеть недоступна. Проверьте VPN/маршрут до ERP.";
+  }
+  if (/channel.?open|administratively prohibited|remote port forwarding failed/i.test(cleaned)) {
+    return "SSH: не удалось открыть туннель (forward). Закройте другой SSH на эту серию и повторите.";
+  }
+  return cleaned.length > 280 ? `${cleaned.slice(0, 280)}…` : cleaned;
+}
+
 /** True when remote message is only "unit missing" (soft uninstall). */
 export function isLabLoggerMissingUnitError(text: string): boolean {
-  const t = stripLabLoggerSshNoise(text).toLowerCase();
+  const t = stripSshNoise(text).toLowerCase();
   if (!t) return false;
   return (
     /unit file does not exist/.test(t) ||
@@ -592,6 +918,10 @@ export function parseLabLoggerHealthJson(text: string): LabLoggerHealth | null {
       lockHeld: Boolean(o.lock_held),
       topologyWarnings: warnings,
       diskBytes: typeof o.disk_bytes === "number" ? o.disk_bytes : 0,
+      availabilityDiskBytes:
+        typeof o.availability_disk_bytes === "number"
+          ? o.availability_disk_bytes
+          : 0,
       ticks: typeof o.ticks === "number" ? o.ticks : 0,
       watchdogBackoff: Boolean(o.watchdog_backoff),
       dxAllowed: o.dx_allowed !== false,
@@ -653,7 +983,7 @@ export function parseLabLoggerStatusOutput(stdout: string): LabLoggerStatus {
     }
   }
 
-  const configMatch = body.match(/###CONFIG###\s*([\s\S]*?)$/);
+  const configMatch = body.match(/###CONFIG###\s*([\s\S]*?)(?=$)/);
   if (configMatch) {
     const cfg = parseLabLoggerConfigJson(configMatch[1].trim());
     if (cfg?.retain_hours != null) retainHours = cfg.retain_hours;
@@ -743,6 +1073,16 @@ export function formatLabLoggerStatusParts(s: LabLoggerStatus): string[] {
         ? `${Math.round(s.health.lastSampleAgeMs)}ms`
         : "?";
     parts.push(`health=ok age=${age}`);
+    const disk = s.health.diskBytes ?? 0;
+    parts.push(`disk=${disk}b`);
+    if (disk <= 0) {
+      parts.push("ring=пуст (нет записей — NATS/source?)");
+    } else if (
+      s.health.lastSampleAgeMs != null &&
+      s.health.lastSampleAgeMs > 60_000
+    ) {
+      parts.push("запись устарела (>60s)");
+    }
   } else if (s.healthError) {
     parts.push(`health=${s.healthError}`);
   }
@@ -1128,4 +1468,150 @@ export function isLabLoggerRealtimeReady(s: LabLoggerStatus | null): boolean {
   if (s.processRunning) return true;
   if (s.health?.ok) return true;
   return false;
+}
+
+/**
+ * Parse one JSON Lines ring row. Empty lines → skip; non-object JSON → invalid.
+ */
+export function parseOnboardRingJsonlLine(
+  line: string
+):
+  | { ok: true; record: unknown }
+  | { ok: false; empty: true }
+  | { ok: false; invalid: true } {
+  const t = line.trim();
+  if (!t) return { ok: false, empty: true };
+  if (!t.startsWith("{")) return { ok: false, invalid: true };
+  try {
+    const rec: unknown = JSON.parse(t);
+    if (!rec || typeof rec !== "object" || Array.isArray(rec)) {
+      return { ok: false, invalid: true };
+    }
+    return { ok: true, record: rec };
+  } catch {
+    return { ok: false, invalid: true };
+  }
+}
+
+/**
+ * Parse a whole onboard ring file as JSON Lines (one record per line).
+ * Returns null if the text is not that format (e.g. single-JSON chart export).
+ */
+export function parseOnboardRingJsonlText(text: string): unknown[] | null {
+  const lines = text.split(/\r?\n/);
+  if (lines.length === 0) return null;
+  const records: unknown[] = [];
+  let sawContent = false;
+  for (const line of lines) {
+    const parsed = parseOnboardRingJsonlLine(line);
+    if ("empty" in parsed && parsed.empty) continue;
+    if (!parsed.ok) return null;
+    sawContent = true;
+    records.push(parsed.record);
+  }
+  return sawContent ? records : null;
+}
+
+/** Evenly sample `count` items across the full array (keeps span coverage). */
+export function sampleEvenly<T>(items: readonly T[], count: number): T[] {
+  if (count <= 0) return [];
+  if (items.length <= count) return [...items];
+  if (count === 1) return [items[items.length - 1]!];
+  const last = items.length - 1;
+  const out: T[] = [];
+  let prev = -1;
+  for (let i = 0; i < count; i++) {
+    const idx = Math.round((i * last) / (count - 1));
+    if (idx === prev) continue;
+    prev = idx;
+    out.push(items[idx]!);
+  }
+  return out;
+}
+
+/**
+ * Cap imported ring events for chart UI/IPC without keeping only the newest
+ * slice — sample evenly across the full time span so a 24h ring still shows
+ * the whole day. Prefer keeping actuators (sparse overlays).
+ */
+export function downsampleLabEventsForImport(
+  events: readonly LabEvent[],
+  max: number = LAB_LOGGER_IMPORT_EVENTS_MAX
+): LabEvent[] {
+  if (max <= 0) return [];
+  if (events.length <= max) return [...events];
+
+  const actuators: LabEvent[] = [];
+  const rest: LabEvent[] = [];
+  for (const e of events) {
+    if (e.kind === "valve" || e.kind === "pump" || e.kind === "heater") {
+      actuators.push(e);
+    } else {
+      rest.push(e);
+    }
+  }
+
+  const actuatorBudget = Math.min(actuators.length, Math.floor(max * 0.25));
+  const keepAct =
+    actuators.length <= actuatorBudget
+      ? actuators
+      : sampleEvenly(actuators, actuatorBudget);
+  const restBudget = Math.max(0, max - keepAct.length);
+  const keepRest =
+    rest.length <= restBudget ? rest : sampleEvenly(rest, restBudget);
+
+  return [...keepAct, ...keepRest].sort(
+    (a, b) => Date.parse(a.at) - Date.parse(b.at)
+  );
+}
+
+/**
+ * Streaming accumulator for large `.jsonl` rings: convert line-by-line and
+ * periodically downsample so peak RAM stays near the chart cap, not file size.
+ */
+export class OnboardRingImportAccumulator {
+  private events: LabEvent[] = [];
+  private records = 0;
+  private eventsRaw = 0;
+  private readonly max: number;
+  private readonly hwid: string;
+
+  constructor(
+    max: number = LAB_LOGGER_IMPORT_EVENTS_MAX,
+    hwid = "onboard-import"
+  ) {
+    this.max = Math.max(1, max);
+    this.hwid = hwid;
+  }
+
+  /** @returns false if the line is not a valid ring record (hard fail). */
+  pushLine(line: string): boolean {
+    const parsed = parseOnboardRingJsonlLine(line);
+    if ("empty" in parsed && parsed.empty) return true;
+    if (!parsed.ok) return false;
+    this.records += 1;
+    const converted = convertOnboardRecordToLabEvents(parsed.record, this.hwid);
+    this.eventsRaw += converted.length;
+    this.events.push(...converted);
+    // Soft cap while streaming — final downsample in finish().
+    if (this.events.length > this.max * 2) {
+      this.events = downsampleLabEventsForImport(this.events, this.max);
+    }
+    return true;
+  }
+
+  finish(): {
+    events: LabEvent[];
+    records: number;
+    eventsBeforeCap: number;
+    eventsAfterCap: number;
+  } {
+    const events = downsampleLabEventsForImport(this.events, this.max);
+    return {
+      events,
+      records: this.records,
+      eventsBeforeCap: this.eventsRaw,
+      eventsAfterCap: events.length,
+    };
+  }
 }

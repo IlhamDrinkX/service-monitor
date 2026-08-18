@@ -19,6 +19,7 @@ describe("desktop / stage0 content wiring", () => {
       "nav.peripherals",
       "nav.complexos",
       "nav.labLogger",
+      "nav.hostPing",
       "nav.config",
       "nav.help",
       "nav.settings",

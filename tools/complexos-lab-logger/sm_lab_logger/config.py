@@ -80,7 +80,6 @@ def _load_file_dict(path: Path) -> Dict[str, Any]:
         return data
     if suffix in (".yaml", ".yml"):
         return _parse_simple_yaml(text, path)
-    # Try JSON first, then YAML
     try:
         data = json.loads(text)
         if isinstance(data, dict):
@@ -162,7 +161,7 @@ def load_config(argv: Optional[List[str]] = None) -> LoggerConfig:
     expected = dict(DEFAULT_EXPECTED)
     file_exp = file_data.get("expected")
     if isinstance(file_exp, Mapping):
-        expected.update({str(k): str(v) for k, v in file_exp.items()})
+        expected.update({str(k): str(v) for k, v in file_exp.items() if v is not None})
 
     cfg = LoggerConfig(
         retain_hours=float(pick(ns.retain_hours, "retain_hours", "retain-hours", default=24.0)),

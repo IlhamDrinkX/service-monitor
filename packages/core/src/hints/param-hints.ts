@@ -198,10 +198,83 @@ const HINTS: ParamHint[] = [
   },
   {
     path: "Thermometers",
-    title: "Карта термодатчиков",
+    title: "Карта термодатчиков (ADS1115)",
     summary:
-      "Привязка логических имён (milk_input, heater1_out, …) к каналам ADS/NTC/PT. Нужна для PID и защит.",
-    codeRef: "govnosensor / periphery + pid measurement keys",
+      "Датчики температуры/давления/тока на ADS1115. Софт НЕ калибрует их кнопкой — считает физическую величину по формуле из коэффициентов этого блока. Каждый датчик: Type (NTC / PT / V-напряжение / P-давление), ads (номер ADS1115, обычно 0 или 1), channel (канал ADC 0…3), Rhigh (верхнее плечо делителя, Ом — для NTC/PT), coefficients (параметры перевода R/V → величина, свои для каждого Type).",
+    codeRef:
+      "~/.config/andromeda/drinkx.json → Thermometers. ⚠ ansible cm_cfg.drinkx может перезаписать файл при деплое, если manual_drinkx_json_update: false. govnosensor / periphery + pid measurement keys.",
+    warnings: [
+      "Нет offset «+2 °C» и нет процедуры калибровки как у pumpPower — единственный способ повлиять на показания этого блока — коэффициенты (B/R0/A) или замена железа.",
+      "Менять B/R0 только если точно известен тип NTC, либо есть сверка с эталонным термометром — иначе можно случайно занизить/завысить факт и спровоцировать перегрев или недогрев напитка.",
+      "Рост °C при выключенных тенах — это железо (утечка тепла/датчик у другого источника), не параметр этого блока.",
+    ],
+  },
+  {
+    path: "Thermometers.milk_input",
+    title: "milk_input — вход PID heater1 (NTC)",
+    summary:
+      "NTC-термистор на входе молока/жидкости. Формула: T = B·T0/(B+T0·ln(R/R0))−273.15, T0=298.15 К. Эталон DrinkX: B≈3984, R0=10000 Ом, A не используется (обычно 0).",
+    codeRef: "PID heater1 input measurement; drivers/dx/pid.js",
+    warnings: [
+      "Скачет на старте — смотрите на сам milk_input и на kInput в PID heater1, не только на коэффициенты датчика.",
+    ],
+  },
+  {
+    path: "Thermometers.heater1_out",
+    title: "heater1_out — факт h1 / вход PID heater2 (NTC)",
+    summary:
+      "NTC на выходе первого тена. Факт для контура heater1 (цель ≈ recipeTemp−20) и одновременно вход измерения для каскада heater2. Формула: T = B·T0/(B+T0·ln(R/R0))−273.15, T0=298.15 К. Эталон DrinkX: B≈3976, R0=50000 Ом.",
+    codeRef: "PID heater1 measurement + heater2 input cascade",
+    warnings: [
+      "Больший B → софт показывает НИЖЕ °C при той же R → PID греет агрессивнее (риск перегрева факта, который PID не видит).",
+      "Занижен B / плохой контакт NTC / неверный R0 или Rhigh → «не догревает / долго».",
+    ],
+  },
+  {
+    path: "Thermometers.heater2_out",
+    title: "heater2_out — факт h2 = цель рецепта (NTC)",
+    summary:
+      "NTC на выходе второго тена — финальная температура к цели рецепта (measurement героя каскада, цель = recipeTemp). Формула: T = B·T0/(B+T0·ln(R/R0))−273.15, T0=298.15 К. Эталон DrinkX: B≈3976, R0=50000 Ом.",
+    codeRef: "PID heater2 measurement (финальный контур)",
+    warnings: [
+      "Пример из практики: B=5100 вместо эталонных 3976 на heater*_out — занижение факта, риск перегрева напитка при логе «цель достигнута».",
+      "Напиток горячее цели при логе «цель достигнута» → в первую очередь проверяйте завышенный B именно здесь.",
+    ],
+  },
+  {
+    path: "Thermometers.heater1_overheat",
+    title: "heater1_overheat — защита PT100, не цель налива",
+    summary:
+      "PT100 защитный датчик перегрева первого контура. Модель PT: T ≈ линеаризация по A/B/R0 (стандартная кривая PT100). Эталон: A≈3.9083e-3, B≈−5.775e-7, R0=1000 Ом. Используется только для защиты — не участвует в цели налива напрямую.",
+    codeRef: "overheat guard / anomaly-detector",
+  },
+  {
+    path: "Thermometers.heater2_overheat",
+    title: "heater2_overheat — защита PT100, не цель налива",
+    summary:
+      "PT100 защитный датчик перегрева второго контура. Та же модель, что heater1_overheat: A≈3.9083e-3, B≈−5.775e-7, R0=1000 Ом. Защита, не цель.",
+    codeRef: "overheat guard / anomaly-detector",
+  },
+  {
+    path: "Thermometers.pump_R_IS",
+    title: "pump_R_IS — ток насоса (Type V), не температура",
+    summary:
+      "Type V — напряжение читается напрямую (без формулы NTC/PT). Показывает ток насоса: пусто/засор диагностируется по этому каналу, а не по температуре. Тот же ключ используется в refill.currentTreshold (порог «есть жидкость»).",
+    codeRef: "cm-drv/drivers/drinkx.js refill/brew: temps.pump_R_IS",
+  },
+  {
+    path: "Thermometers.pump_L_IS",
+    title: "pump_L_IS — ток левого насоса (Type V)",
+    summary:
+      "Type V — напряжение напрямую, аналог pump_R_IS для второго/левого насоса. Не температура.",
+    codeRef: "cm-drv drinkx.js — второй насос",
+  },
+  {
+    path: "Thermometers.water_pressure",
+    title: "water_pressure — давление (Type P)",
+    summary:
+      "Type P — линейная интерполяция по p_min/p_max и v_min_5v/v_max_5v (не формула NTC/PT). Присутствует, если на модуле есть датчик давления воды.",
+    codeRef: "P-type linear interpolation (p_min/p_max, v_min_5v/v_max_5v)",
   },
   {
     path: "hwid",

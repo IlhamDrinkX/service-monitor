@@ -78,8 +78,8 @@ function execOnModule(
               reject(err);
               return;
             }
-            let stdout = "";
-            let stderr = "";
+            const stdoutChunks: Buffer[] = [];
+            const stderrChunks: Buffer[] = [];
             stream
               .on("close", (code: number | null) => {
                 clearTimeout(timer);
@@ -88,6 +88,8 @@ function execOnModule(
                 } catch {
                   // ignore
                 }
+                const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+                const stderr = Buffer.concat(stderrChunks).toString("utf8");
                 // ssh2 даёт code=null, если канал оборвался (типично при restart сервиса).
                 const ok =
                   code === 0 ||
@@ -105,10 +107,10 @@ function execOnModule(
                   );
               })
               .on("data", (d: Buffer) => {
-                stdout += d.toString();
+                stdoutChunks.push(d);
               });
             stream.stderr.on("data", (d: Buffer) => {
-              stderr += d.toString();
+              stderrChunks.push(d);
             });
           });
         })

@@ -244,9 +244,52 @@ export type DesktopApi = {
     { ok: true; events: unknown[] } | { ok: false; error: string }
   >;
   labLoggerDownloadRing: () => Promise<
+    | {
+        ok: true;
+        path: string;
+        bytes: number;
+      }
+    | { ok: false; error: string }
+  >;
+  onLabLoggerDownloadProgress: (
+    cb: (progress: {
+      bytesReceived: number;
+      bytesTotal: number;
+      percent: number;
+      chunkIndex?: number;
+      chunkCount?: number;
+    }) => void
+  ) => () => void;
+  /** Host ping / доступность LAN (отдельно от бортового лога). */
+  hostPingStatus: () => Promise<
+    | { ok: true; status: import("@service-monitor/core").HostPingStatus }
+    | { ok: false; error: string }
+  >;
+  hostPingInstall: (input: {
+    tabletIp?: string;
+    tabletMac?: string;
+    enableAutostart?: boolean;
+  }) => Promise<
+    | { ok: true; sha256: string; fileCount: number; message: string }
+    | { ok: false; error: string }
+  >;
+  hostPingUninstall: (input?: {
+    wipeData?: boolean;
+  }) => Promise<{ ok: true; message: string } | { ok: false; error: string }>;
+  hostPingSetAutostart: (input: {
+    enabled: boolean;
+  }) => Promise<{ ok: true; message: string } | { ok: false; error: string }>;
+  hostPingSetTablet: (input: {
+    tabletIp?: string;
+    tabletMac?: string;
+  }) => Promise<{ ok: true; message: string } | { ok: false; error: string }>;
+  hostPingDownloadRing: () => Promise<
     | { ok: true; path: string; bytes: number }
     | { ok: false; error: string }
   >;
+  hostPingFetchRecent: (input?: {
+    lines?: number;
+  }) => Promise<{ ok: true; text: string } | { ok: false; error: string }>;
   syrupModbusScan: (input: {
     mode: "scan" | "motor";
     maxId?: number;
@@ -336,6 +379,42 @@ export type DesktopApi = {
   labChartToggleFullScreen: () => Promise<
     { ok: true; fullScreen: boolean } | { ok: false }
   >;
+  /** Stream-safe import of chart JSON / onboard ring jsonl (main process). */
+  labChartImportLog: (input?: {
+    path?: string;
+  }) => Promise<
+    | {
+        ok: true;
+        format: "onboard-ring";
+        events: import("@service-monitor/core").LabEvent[];
+        meta: {
+          path: string;
+          bytes: number;
+          records: number;
+          eventsBeforeCap: number;
+          eventsAfterCap: number;
+          capped: boolean;
+        };
+      }
+    | {
+        ok: true;
+        format: "chart-log";
+        raw: unknown;
+        meta: { path: string; bytes: number };
+      }
+    | { ok: false; error: string; canceled?: boolean }
+  >;
+  onLabChartImportProgress: (
+    cb: (progress: {
+      phase: "open" | "read" | "done" | "error";
+      bytesRead: number;
+      bytesTotal: number;
+      records: number;
+      events: number;
+      path?: string;
+      message?: string;
+    }) => void
+  ) => () => void;
   onLabChartState: (cb: (payload: unknown) => void) => () => void;
   onLabChartFocus: (
     cb: (payload: { focusSensor?: string | null }) => void
@@ -440,6 +519,30 @@ const api: DesktopApi = {
   labLoggerFetchEvents: (input) =>
     ipcRenderer.invoke("labLogger:fetchEvents", input),
   labLoggerDownloadRing: () => ipcRenderer.invoke("labLogger:downloadRing"),
+  onLabLoggerDownloadProgress: (cb) => {
+    const handler = (
+      _e: IpcRendererEvent,
+      progress: {
+        bytesReceived: number;
+        bytesTotal: number;
+        percent: number;
+        chunkIndex?: number;
+        chunkCount?: number;
+      }
+    ) => cb(progress);
+    ipcRenderer.on("labLogger:downloadProgress", handler);
+    return () =>
+      ipcRenderer.removeListener("labLogger:downloadProgress", handler);
+  },
+  hostPingStatus: () => ipcRenderer.invoke("hostPing:status"),
+  hostPingInstall: (input) => ipcRenderer.invoke("hostPing:install", input),
+  hostPingUninstall: (input) => ipcRenderer.invoke("hostPing:uninstall", input),
+  hostPingSetAutostart: (input) =>
+    ipcRenderer.invoke("hostPing:setAutostart", input),
+  hostPingSetTablet: (input) => ipcRenderer.invoke("hostPing:setTablet", input),
+  hostPingDownloadRing: () => ipcRenderer.invoke("hostPing:downloadRing"),
+  hostPingFetchRecent: (input) =>
+    ipcRenderer.invoke("hostPing:fetchRecent", input),
   syrupModbusScan: (input) => ipcRenderer.invoke("syrup:modbusScan", input),
   flashPartA: (config) => ipcRenderer.invoke("flash:partA", config),
   flashPartB: (config) => ipcRenderer.invoke("flash:partB", config),
@@ -459,6 +562,24 @@ const api: DesktopApi = {
   closeLabChartWindow: () => ipcRenderer.invoke("labChart:close"),
   labChartToggleFullScreen: () =>
     ipcRenderer.invoke("labChart:toggleFullScreen"),
+  labChartImportLog: (input) =>
+    ipcRenderer.invoke("labChart:importLog", input ?? {}),
+  onLabChartImportProgress: (cb) => {
+    const handler = (
+      _e: Electron.IpcRendererEvent,
+      progress: {
+        phase: "open" | "read" | "done" | "error";
+        bytesRead: number;
+        bytesTotal: number;
+        records: number;
+        events: number;
+        path?: string;
+        message?: string;
+      }
+    ) => cb(progress);
+    ipcRenderer.on("labChart:importProgress", handler);
+    return () => ipcRenderer.removeListener("labChart:importProgress", handler);
+  },
   onLabChartState: (cb) => {
     const handler = (_e: IpcRendererEvent, payload: unknown) => cb(payload);
     ipcRenderer.on("labChart:state", handler);

@@ -12,10 +12,12 @@ import {
   convertOnboardRecordsToLabEvents,
   formatLabLoggerStatusLine,
   isLabLoggerRealtimeReady,
+  isLabLoggerSessionAllowed,
   isSeries4ForLabLogger,
   maxOnboardRecordTs,
   nextOnboardEventsFromTs,
   parseLabLoggerStatusOutput,
+  resolveLabLoggerSshTarget,
 } from "@service-monitor/core";
 
 describe("desktop / labLogger help + helpers", () => {
@@ -39,6 +41,7 @@ describe("desktop / labLogger help + helpers", () => {
     assert.match(CONTROL_HELPS["labLogger.path"]!.body, /\/home\/pi\/sm-lab-logger/);
     assert.match(CONTROL_HELPS["labLogger.realtime"]!.body, /1500/);
     assert.match(CONTROL_HELPS["labLogger.realtime"]!.body, /1000/);
+    assert.match(CONTROL_HELPS["nav.labLogger"]!.body, /Local LAN|192\.168\.1\.43/);
   });
 
   it("clamps poll interval and converts onboard events (UI logic)", () => {
@@ -56,9 +59,21 @@ describe("desktop / labLogger help + helpers", () => {
     assert.equal(isLabLoggerRealtimeReady(null), false);
   });
 
-  it("gates series-4 for page controls", () => {
+  it("gates series-4 for page controls; Local LAN without series still allowed", () => {
     assert.equal(isSeries4ForLabLogger("4.11"), true);
     assert.equal(isSeries4ForLabLogger("3.05"), false);
+    assert.equal(
+      isLabLoggerSessionAllowed({
+        connected: true,
+        mode: "local",
+        seriesLabel: null,
+      }),
+      true
+    );
+    assert.deepEqual(
+      resolveLabLoggerSshTarget({ connected: true, mode: "local" }),
+      { mode: "local", host: "192.168.1.43", port: 22 }
+    );
   });
 
   it("formats status line for UI badge with path", () => {

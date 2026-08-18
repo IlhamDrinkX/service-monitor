@@ -61,6 +61,16 @@ import {
   labLoggerStatus,
   labLoggerUninstall,
 } from "./lab-logger-service";
+import {
+  hostPingDownloadRing,
+  hostPingFetchRecent,
+  hostPingInstall,
+  hostPingSetAutostart,
+  hostPingSetTablet,
+  hostPingStatus,
+  hostPingUninstall,
+} from "./host-ping-service";
+import { labChartImportLog } from "./lab-chart-import";
 import { flashPartA, flashPartB } from "./flash-service";
 import {
   clearSessionPrefs,
@@ -198,12 +208,35 @@ async function ensureDebugSink(enabled: boolean): Promise<void> {
     dir,
     `session-${new Date().toISOString().replace(/[:.]/g, "-")}.log`
   );
+  // UTF-8 BOM so Windows Notepad / editors open RU session messages correctly.
+  let bomWritten = false;
   logger.setSink({
     append: async (line) => {
-      await writeFile(file, line, { flag: "a", encoding: "utf8" });
+      const payload = bomWritten ? line : `\uFEFF${line}`;
+      bomWritten = true;
+      await writeFile(file, payload, { flag: "a", encoding: "utf8" });
     },
   });
   logger.info("main", "Debug log file ready", { file });
+}
+
+/** Windows console often uses OEM CP866 — UTF-8 RU looks like «╨┐╨╛╤А╤В». */
+function ensureWindowsUtf8Console(): void {
+  if (process.platform !== "win32") return;
+  try {
+    spawnSync("chcp.com", ["65001"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+  } catch {
+    // ignore — console may still mis-render; file logs stay UTF-8
+  }
+  try {
+    process.stdout.setDefaultEncoding("utf8");
+    process.stderr.setDefaultEncoding("utf8");
+  } catch {
+    // ignore
+  }
 }
 
 function loadRenderer(
@@ -371,6 +404,16 @@ function registerIpc(): void {
     labChartWindow.setFullScreen(next);
     return { ok: true as const, fullScreen: next };
   });
+
+  ipcMain.handle(
+    "labChart:importLog",
+    async (e, input?: { path?: string }) => {
+      return labChartImportLog({
+        path: typeof input?.path === "string" ? input.path : undefined,
+        sender: e.sender,
+      });
+    }
+  );
 
   ipcMain.handle("debug:setEnabled", async (_e, enabled: boolean) => {
     await ensureDebugSink(Boolean(enabled));
@@ -925,8 +968,72 @@ function registerIpc(): void {
     async (_e, input?: { fromTs?: number }) =>
       labLoggerFetchEvents({ ...labId(), fromTs: input?.fromTs })
   );
-  ipcMain.handle("labLogger:downloadRing", async () =>
-    labLoggerDownloadRing(labId())
+  ipcMain.handle("labLogger:downloadRing", async (e) =>
+    labLoggerDownloadRing({
+      ...labId(),
+      onProgress: (p) => {
+        try {
+          if (!e.sender.isDestroyed()) {
+            e.sender.send("labLogger:downloadProgress", p);
+          }
+        } catch {
+          // soft-fail: progress must not abort download
+        }
+      },
+    })
+  );
+
+  ipcMain.handle("hostPing:status", async () => {
+    const res = await hostPingStatus(labId());
+    if (!res.ok) logger.warn("hostPing", "status failed", { error: res.error });
+    return res;
+  });
+  ipcMain.handle(
+    "hostPing:install",
+    async (
+      _e,
+      input?: {
+        tabletIp?: string;
+        tabletMac?: string;
+        enableAutostart?: boolean;
+      }
+    ) => {
+      const res = await hostPingInstall({ ...labId(), ...input });
+      if (res.ok) logger.info("hostPing", "install ok", { sha256: res.sha256 });
+      else logger.warn("hostPing", "install failed", { error: res.error });
+      return res;
+    }
+  );
+  ipcMain.handle(
+    "hostPing:uninstall",
+    async (_e, input?: { wipeData?: boolean }) => {
+      const res = await hostPingUninstall({ ...labId(), ...input });
+      if (!res.ok) logger.warn("hostPing", "uninstall failed", { error: res.error });
+      return res;
+    }
+  );
+  ipcMain.handle(
+    "hostPing:setAutostart",
+    async (_e, input: { enabled: boolean }) => {
+      return hostPingSetAutostart({
+        ...labId(),
+        enabled: Boolean(input?.enabled),
+      });
+    }
+  );
+  ipcMain.handle(
+    "hostPing:setTablet",
+    async (_e, input: { tabletIp?: string; tabletMac?: string }) => {
+      return hostPingSetTablet({ ...labId(), ...input });
+    }
+  );
+  ipcMain.handle("hostPing:downloadRing", async () =>
+    hostPingDownloadRing(labId())
+  );
+  ipcMain.handle(
+    "hostPing:fetchRecent",
+    async (_e, input?: { lines?: number }) =>
+      hostPingFetchRecent({ ...labId(), lines: input?.lines })
   );
 
   ipcMain.handle(
@@ -1157,6 +1264,7 @@ function registerIpc(): void {
 }
 
 app.whenReady().then(async () => {
+  ensureWindowsUtf8Console();
   registerIpc();
   const restored = await loadErpSession();
   if (restored) {
